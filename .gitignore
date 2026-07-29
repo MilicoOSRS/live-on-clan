@@ -1,0 +1,16 @@
+.gradle
+build
+.idea/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+
+# Local development server and generated data are deployed separately.
+server/
+
+# Local agent/development notes.
+AGENTS.md
+CLAUDE.md
