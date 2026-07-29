@@ -55,7 +55,7 @@ import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ScriptPreFired;
-import net.runelite.api.widgets.WidgetInfo;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.events.ConfigChanged;
 import javax.swing.JOptionPane;
@@ -267,19 +267,19 @@ public class ClanMessagesPlugin extends Plugin
 		int packedWidgetId = event.getActionParam1();
 		int groupId = WidgetUtil.componentToInterface(packedWidgetId);
 		int childId = WidgetUtil.componentToId(packedWidgetId);
-		if (groupId != WidgetInfo.CHATBOX_MESSAGE_LINES.getGroupId())
+		if (groupId != InterfaceID.CHATBOX)
 		{
 			return;
 		}
 
 		Widget menuWidget = client.getWidget(groupId, childId);
 		Widget messageLines = menuWidget == null ? null : menuWidget.getParent();
-		if (messageLines == null || messageLines.getId() != WidgetInfo.CHATBOX_MESSAGE_LINES.getPackedId())
+		if (messageLines == null || messageLines.getId() != InterfaceID.Chatbox.SCROLLAREA)
 		{
 			return;
 		}
 
-		int messageChildIndex = (childId - WidgetInfo.CHATBOX_FIRST_MESSAGE.getChildId()) * 4 + 1;
+		int messageChildIndex = (childId - (InterfaceID.Chatbox.LINE0 & 0xFFFF)) * 4 + 1;
 		Widget messageWidget = messageChildIndex < 0 ? null : messageLines.getChild(messageChildIndex);
 		if (messageWidget == null)
 		{
