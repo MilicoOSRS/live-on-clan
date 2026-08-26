@@ -12,6 +12,8 @@ final class MvpDropEntry
 	private long totalValue;
 	@SerializedName("drop_count")
 	private int dropCount;
+	@SerializedName("top_drops")
+	private MvpDropDetail[] topDrops;
 
 	MvpDropEntry()
 	{

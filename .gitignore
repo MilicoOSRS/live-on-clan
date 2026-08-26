@@ -14,3 +14,11 @@ server/
 # Local agent/development notes.
 AGENTS.md
 CLAUDE.md
+
+# Generated packages, local databases and recovery artifacts.
+/*.jar
+/*.zip
+/*.sqlite3
+/*.csv
+/.codex-*
+/.gradle-user*/

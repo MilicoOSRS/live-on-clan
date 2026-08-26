@@ -2,8 +2,10 @@ package com.liveon;
 
 import com.google.gson.annotations.SerializedName;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.GridLayout;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -65,8 +67,12 @@ final class RankRequestsPanel extends JPanel
 		scrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
 		add(scrollPane, BorderLayout.CENTER);
 
-		JPanel actions = new JPanel();
-		JButton confirm = new JButton("Confirmar Selecionado");
+		JPanel actions = new JPanel(new GridLayout(1, 3, 3, 0));
+		JButton confirm = new JButton("Aceitar");
+		confirm.setMargin(new java.awt.Insets(3, 2, 3, 2));
+		confirm.setBackground(new Color(190, 104, 0));
+		confirm.setForeground(Color.WHITE);
+		confirm.setToolTipText("Aceitar solicitação selecionada");
 		confirm.addActionListener(event ->
 		{
 			int selectedRow = requestsTable.getSelectedRow();
@@ -79,7 +85,9 @@ final class RankRequestsPanel extends JPanel
 				setStatus("Selecione uma solicitação");
 			}
 		});
-		JButton delete = new JButton("Deletar Selecionado");
+		JButton delete = new JButton("Excluir");
+		delete.setMargin(new java.awt.Insets(3, 2, 3, 2));
+		delete.setToolTipText("Excluir solicitação selecionada");
 		delete.addActionListener(event ->
 		{
 			int selectedRow = requestsTable.getSelectedRow();
@@ -92,7 +100,9 @@ final class RankRequestsPanel extends JPanel
 				setStatus("Selecione uma solicitação");
 			}
 		});
-		JButton decline = new JButton("Recusar Selecionado");
+		JButton decline = new JButton("Recusar");
+		decline.setMargin(new java.awt.Insets(3, 2, 3, 2));
+		decline.setToolTipText("Recusar solicitação selecionada");
 		decline.addActionListener(event ->
 		{
 			int selectedRow = requestsTable.getSelectedRow();

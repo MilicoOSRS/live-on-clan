@@ -2,7 +2,6 @@ package com.liveon;
 
 import java.awt.BorderLayout;
 import java.awt.Dimension;
-import java.awt.FlowLayout;
 import java.awt.GridLayout;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -32,7 +31,12 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JButton publish = new JButton("Publicar");
 	private final javax.swing.JCheckBox pinBroadcast = new javax.swing.JCheckBox("Fixar broadcast");
 	private final JLabel status = new JLabel("Desconectado");
-	private final JTabbedPane tabs = new JTabbedPane();
+	private final java.awt.CardLayout mainCardsLayout = new java.awt.CardLayout();
+	private final JPanel mainCards = new JPanel(mainCardsLayout);
+	private final JPanel navigationGrid = new JPanel(new GridLayout(2, 2, 3, 3));
+	private final JPanel mainArea = new JPanel(new BorderLayout(0, 4));
+	private final java.util.List<JButton> navigationButtons = new java.util.ArrayList<>();
+	private String selectedPage = "";
 	private final JPanel accessTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel chatTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel staffTab = new JPanel(new BorderLayout(5, 5));
@@ -41,7 +45,7 @@ final class ClanMessagesPanel extends PluginPanel
 	private final RankRequestsPanel rankRequestsTab;
 	private final LiveOnPanel liveOnTab;
 	private final MvpManagementPanel mvpManagementTab;
-	private final DefaultTableModel sentMessagesModel = new DefaultTableModel(new String[]{"Tipo", "Fixada", "Mensagem"}, 0)
+	private final DefaultTableModel sentMessagesModel = new DefaultTableModel(new String[]{"Staff", "Tipo", "Mensagem"}, 0)
 	{
 		@Override public boolean isCellEditable(int row, int column) { return false; }
 	};
@@ -58,42 +62,229 @@ final class ClanMessagesPanel extends PluginPanel
 		createAccessTab(verifyTokenAction);
 		createChatTab();
 		mvpManagementTab = new MvpManagementPanel(refreshMvpMembersAction, saveMvpMemberAction, deleteMvpMemberAction);
-		createStaffTab(publishBroadcastAction, publishClanAction, clearMessagesAction, refreshSentMessagesAction, deleteSentMessageAction, resendSentMessageAction, togglePinnedMessageAction, initialStaffAccessKey, saveStaffAccessKeyAction);
 		ranksTab = new RanksPanel(refreshRanksAction, resetRanksAction, requestRankAction);
 		rankRequestsTab = new RankRequestsPanel(refreshRankRequestsAction, deleteRankRequestAction, confirmRankRequestAction, declineRankRequestAction);
 		liveOnTab = new LiveOnPanel(refreshLivesAction, saveLiveChannelAction, deleteLiveChannelAction);
+		createStaffTab(publishBroadcastAction, publishClanAction, clearMessagesAction, refreshSentMessagesAction, deleteSentMessageAction, resendSentMessageAction, togglePinnedMessageAction, initialStaffAccessKey, saveStaffAccessKeyAction);
 		setAuthenticated(false, false);
-		add(tabs, BorderLayout.CENTER);
+		add(mainArea, BorderLayout.CENTER);
 		add(createLinksFooter(), BorderLayout.SOUTH);
 		setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH, 650));
 	}
 
 	private JPanel createLinksFooter()
 	{
-		JPanel footer = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 3));
-		footer.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(55, 55, 55)));
+		JPanel footer = new JPanel(new BorderLayout());
+		footer.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(55, 55, 55)),
+			BorderFactory.createEmptyBorder(6, 10, 2, 10)));
+		JPanel links = new JPanel(new GridLayout(1, 2, 5, 0));
 
 		JButton discord = new JButton("Discord");
-		discord.setIcon(loadIcon("/links/discord.png"));
+		discord.setIcon(loadIcon("/links/discord.png", 16));
 		discord.setToolTipText("Abrir Discord do Live ON");
-		discord.setMargin(new java.awt.Insets(2, 7, 2, 7));
+		discord.setMargin(new java.awt.Insets(3, 6, 3, 6));
 		discord.addActionListener(event -> LinkBrowser.browse("https://www.discord.gg/liveon"));
 
 		JButton wom = new JButton("WOM");
-		wom.setIcon(loadIcon("/links/wom.png"));
+		wom.setIcon(loadIcon("/links/wom.png", 16));
 		wom.setToolTipText("Abrir grupo no Wise Old Man");
-		wom.setMargin(new java.awt.Insets(2, 7, 2, 7));
+		wom.setMargin(new java.awt.Insets(3, 6, 3, 6));
 		wom.addActionListener(event -> LinkBrowser.browse("https://wiseoldman.net/groups/1945"));
 
-		footer.add(discord);
-		footer.add(wom);
+		links.add(discord);
+		links.add(wom);
+		footer.add(links, BorderLayout.CENTER);
 		return footer;
 	}
 
-	private ImageIcon loadIcon(String resource)
+	private ImageIcon loadIcon(String resource, int size)
 	{
 		java.awt.image.BufferedImage image = ImageUtil.loadImageResource(getClass(), resource);
-		return image == null ? null : new ImageIcon(image);
+		if (image == null)
+		{
+			return null;
+		}
+		java.awt.Image scaled = image.getScaledInstance(size, size, java.awt.Image.SCALE_SMOOTH);
+		return new ImageIcon(scaled);
+	}
+
+	private ImageIcon createUiIcon(String type)
+	{
+		java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+		java.awt.Graphics2D graphics = image.createGraphics();
+		graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+		graphics.setColor("live".equals(type) ? new java.awt.Color(50, 210, 90)
+			: ("trophy".equals(type) || "ranks".equals(type) || "key".equals(type))
+				? new java.awt.Color(225, 170, 45) : new java.awt.Color(210, 210, 210));
+		graphics.setStroke(new java.awt.BasicStroke(1.7f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
+		if ("refresh".equals(type))
+		{
+			graphics.drawArc(2, 2, 11, 11, 35, 285);
+			graphics.fillPolygon(new int[]{11, 15, 14}, new int[]{1, 3, 6}, 3);
+		}
+		else if ("resend".equals(type))
+		{
+			graphics.drawLine(2, 12, 8, 6);
+			graphics.drawLine(8, 6, 13, 6);
+			graphics.fillPolygon(new int[]{8, 8, 14}, new int[]{2, 10, 6}, 3);
+		}
+		else if ("pin".equals(type))
+		{
+			graphics.drawLine(4, 3, 12, 11);
+			graphics.drawLine(8, 8, 3, 13);
+			graphics.drawLine(7, 2, 13, 8);
+			graphics.drawLine(9, 1, 14, 6);
+		}
+		else if ("trash".equals(type))
+		{
+			graphics.drawRect(4, 5, 8, 9);
+			graphics.drawLine(3, 4, 13, 4);
+			graphics.drawLine(6, 2, 10, 2);
+			graphics.drawLine(7, 7, 7, 12);
+			graphics.drawLine(9, 7, 9, 12);
+		}
+		else if ("key".equals(type))
+		{
+			graphics.drawOval(2, 2, 7, 7);
+			graphics.drawLine(8, 8, 14, 14);
+			graphics.drawLine(11, 11, 13, 9);
+			graphics.drawLine(13, 13, 15, 11);
+		}
+		else if ("trophy".equals(type))
+		{
+			graphics.drawRect(5, 2, 6, 7);
+			graphics.drawArc(1, 3, 6, 6, 80, 200);
+			graphics.drawArc(9, 3, 6, 6, -100, 200);
+			graphics.drawLine(8, 9, 8, 13);
+			graphics.drawLine(5, 14, 11, 14);
+		}
+		else if ("ranks".equals(type))
+		{
+			graphics.drawPolygon(new int[]{8, 14, 12, 8, 4, 2}, new int[]{1, 4, 11, 15, 11, 4}, 6);
+			graphics.drawLine(5, 6, 11, 6);
+			graphics.drawLine(6, 9, 10, 9);
+		}
+		else if ("live".equals(type))
+		{
+			graphics.fillOval(4, 4, 8, 8);
+		}
+		else if ("message".equals(type))
+		{
+			graphics.drawRoundRect(2, 3, 12, 8, 2, 2);
+			graphics.drawLine(5, 11, 4, 14);
+			graphics.drawLine(5, 11, 8, 11);
+		}
+		else if ("requests".equals(type))
+		{
+			graphics.drawRect(3, 3, 10, 11);
+			graphics.drawLine(6, 1, 10, 1);
+			graphics.drawLine(5, 6, 11, 6);
+			graphics.drawLine(5, 9, 11, 9);
+		}
+		graphics.dispose();
+		return new ImageIcon(image);
+	}
+
+	private void addNavigationButton(String title, String iconType, JPanel component, String pageKey, String tooltip)
+	{
+		mainCards.add(component, pageKey);
+		JButton button = new JButton(title, createUiIcon(iconType));
+		button.setName(pageKey);
+		button.setToolTipText(tooltip);
+		button.setIconTextGap(5);
+		button.setMargin(new java.awt.Insets(5, 4, 5, 4));
+		button.setFocusPainted(false);
+		button.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+		button.addActionListener(event -> selectPage(pageKey));
+		navigationButtons.add(button);
+		navigationGrid.add(button);
+	}
+
+	private void selectPage(String pageKey)
+	{
+		selectedPage = pageKey;
+		mainCardsLayout.show(mainCards, pageKey);
+		for (JButton button : navigationButtons)
+		{
+			boolean selected = pageKey.equals(button.getName());
+			button.setForeground(selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(210, 210, 210));
+			button.setBackground(selected ? new java.awt.Color(50, 50, 50) : new java.awt.Color(35, 35, 35));
+			button.setBorder(BorderFactory.createCompoundBorder(
+				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 1, 0,
+					selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(55, 55, 55)),
+				BorderFactory.createEmptyBorder(3, 3, selected ? 2 : 3, 3)));
+		}
+	}
+
+	private static void updateNavigationStyle(JTabbedPane tabbedPane)
+	{
+		for (int index = 0; index < tabbedPane.getTabCount(); index++)
+		{
+			java.awt.Component component = tabbedPane.getTabComponentAt(index);
+			if (!(component instanceof javax.swing.AbstractButton)) continue;
+			javax.swing.AbstractButton label = (javax.swing.AbstractButton) component;
+			boolean selected = index == tabbedPane.getSelectedIndex();
+			label.setForeground(selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(210, 210, 210));
+			label.setBorder(BorderFactory.createCompoundBorder(
+				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 0, 0, new java.awt.Color(255, 152, 0)),
+				BorderFactory.createEmptyBorder(5, 3, selected ? 3 : 5, 3)));
+		}
+	}
+
+	private void configureSectionTabs(JTabbedPane sections, String[] titles, String[] iconTypes)
+	{
+		sections.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
+		for (int index = 0; index < sections.getTabCount(); index++)
+		{
+			JButton label = new JButton(titles[index], createUiIcon(iconTypes[index]));
+			label.setIconTextGap(3);
+			label.setContentAreaFilled(false);
+			label.setFocusPainted(false);
+			label.setMargin(new java.awt.Insets(0, 0, 0, 0));
+			label.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+			final int tabIndex = index;
+			label.addActionListener(event -> sections.setSelectedIndex(tabIndex));
+			sections.setTabComponentAt(index, label);
+		}
+		sections.addChangeListener(event -> updateNavigationStyle(sections));
+		updateNavigationStyle(sections);
+	}
+
+	private void configureStaffTabs(JTabbedPane sections, String[] tooltips, String[] iconTypes)
+	{
+		sections.setTabLayoutPolicy(JTabbedPane.WRAP_TAB_LAYOUT);
+		sections.setBackground(new java.awt.Color(28, 26, 23));
+		for (int index = 0; index < sections.getTabCount(); index++)
+		{
+			JButton button = new JButton(createUiIcon(iconTypes[index]));
+			button.setToolTipText(tooltips[index]);
+			button.setPreferredSize(new Dimension(44, 28));
+			button.setFocusPainted(false);
+			button.setMargin(new java.awt.Insets(3, 12, 3, 12));
+			button.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+			final int tabIndex = index;
+			button.addActionListener(event -> sections.setSelectedIndex(tabIndex));
+			sections.setTabComponentAt(index, button);
+		}
+		sections.addChangeListener(event -> updateStaffTabStyle(sections));
+		updateStaffTabStyle(sections);
+	}
+
+	private static void updateStaffTabStyle(JTabbedPane sections)
+	{
+		for (int index = 0; index < sections.getTabCount(); index++)
+		{
+			java.awt.Component component = sections.getTabComponentAt(index);
+			if (!(component instanceof JButton)) continue;
+			JButton button = (JButton) component;
+			boolean selected = index == sections.getSelectedIndex();
+			button.setBackground(selected ? new java.awt.Color(71, 52, 20) : new java.awt.Color(35, 33, 30));
+			button.setBorder(BorderFactory.createCompoundBorder(
+				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 1, 0,
+					selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(60, 57, 52)),
+				BorderFactory.createEmptyBorder(3, 8, selected ? 2 : 3, 8)));
+		}
 	}
 
 	private JButton verifyButton;
@@ -111,6 +302,8 @@ final class ClanMessagesPanel extends PluginPanel
 		JPanel fields = new JPanel(new GridLayout(0, 1, 3, 3));
 		// Authentication via RSN + WOM group verification. Use default button size so countdown fits.
 		verifyButton = new JButton("Verificar agora");
+		verifyButton.setBackground(new java.awt.Color(190, 104, 0));
+		verifyButton.setForeground(java.awt.Color.WHITE);
 		verifyButton.addActionListener(event -> verifyTokenAction.run());
 		JPanel buttonWrap = new JPanel();
 		buttonWrap.add(verifyButton);
@@ -174,50 +367,76 @@ final class ClanMessagesPanel extends PluginPanel
 
 	private void createStaffTab(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable clearMessagesAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction)
 	{
+		staffTab.setBackground(new java.awt.Color(28, 26, 23));
+		staffTab.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(122, 82, 24)));
 		JPanel publisher = new JPanel(new BorderLayout(5, 5));
 		JPanel composerHeader = new JPanel(new BorderLayout());
-		composerHeader.add(new JLabel("Mensagem para o clã:"), BorderLayout.NORTH);
+		composerHeader.add(new JLabel("Mensagem para o clã"), BorderLayout.NORTH);
+		javax.swing.JToggleButton broadcastMode = new javax.swing.JToggleButton("Broadcast", true);
+		javax.swing.JToggleButton clanMode = new javax.swing.JToggleButton("Clan channel");
+		javax.swing.ButtonGroup publishModes = new javax.swing.ButtonGroup();
+		publishModes.add(broadcastMode);
+		publishModes.add(clanMode);
+		JPanel modeSelector = new JPanel(new GridLayout(1, 2, 2, 0));
+		modeSelector.setBorder(BorderFactory.createEmptyBorder(4, 0, 2, 0));
+		modeSelector.add(broadcastMode);
+		modeSelector.add(clanMode);
 		pinBroadcast.setToolTipText("Entregar este broadcast também aos próximos jogadores que entrarem");
-		composerHeader.add(pinBroadcast, BorderLayout.SOUTH);
+		JPanel composerOptions = new JPanel(new BorderLayout());
+		composerOptions.add(modeSelector, BorderLayout.NORTH);
+		composerOptions.add(pinBroadcast, BorderLayout.SOUTH);
+		composerHeader.add(composerOptions, BorderLayout.SOUTH);
 		publisher.add(composerHeader, BorderLayout.NORTH);
+		broadcastMode.addActionListener(event -> pinBroadcast.setVisible(true));
+		clanMode.addActionListener(event -> pinBroadcast.setVisible(false));
 		composer.setLineWrap(true);
 		composer.setWrapStyleWord(true);
 		JScrollPane composerScrollPane = new JScrollPane(composer);
-		composerScrollPane.setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH - 20, 100));
+		composerScrollPane.setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH - 20, 82));
 		publisher.add(composerScrollPane, BorderLayout.CENTER);
-		publish.setText("Publicar broadcast");
-		publish.addActionListener(event -> publishBroadcastAction.run());
-		JButton clanPublish = new JButton("Publicar clan channel");
-		clanPublish.addActionListener(event -> publishClanAction.run());
-		JButton clear = new JButton("Limpar mensagens");
+		publish.setText("Enviar mensagem");
+		publish.setBackground(new java.awt.Color(190, 104, 0));
+		publish.setForeground(java.awt.Color.WHITE);
+		publish.addActionListener(event ->
+		{
+			if (broadcastMode.isSelected()) publishBroadcastAction.run();
+			else publishClanAction.run();
+		});
+		JButton clear = new JButton(createUiIcon("trash"));
+		clear.setToolTipText("Limpar todas as mensagens");
+		clear.setPreferredSize(new Dimension(36, 26));
 		clear.addActionListener(event ->
 		{
 			int result = JOptionPane.showConfirmDialog(this, "Apagar todas as mensagens do clã?", "Confirmar limpeza", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
 			if (result == JOptionPane.YES_OPTION) clearMessagesAction.run();
 		});
-		JPanel publishActions = new JPanel(new GridLayout(3, 1, 3, 3));
-		publishActions.add(publish);
-		publishActions.add(clanPublish);
-		publishActions.add(clear);
+		JPanel publishActions = new JPanel(new BorderLayout(4, 0));
+		publishActions.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
+		publishActions.add(publish, BorderLayout.CENTER);
+		publishActions.add(clear, BorderLayout.EAST);
 		publisher.add(publishActions, BorderLayout.SOUTH);
 
 		JPanel history = new JPanel(new BorderLayout(5, 5));
 		history.setBorder(BorderFactory.createTitledBorder("Mensagens enviadas"));
 		sentMessagesTable.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
-		sentMessagesTable.getColumnModel().getColumn(0).setPreferredWidth(75);
-		sentMessagesTable.getColumnModel().getColumn(0).setMaxWidth(90);
-		sentMessagesTable.getColumnModel().getColumn(1).setPreferredWidth(50);
-		sentMessagesTable.getColumnModel().getColumn(1).setMaxWidth(60);
+		sentMessagesTable.getColumnModel().getColumn(0).setPreferredWidth(55);
+		sentMessagesTable.getColumnModel().getColumn(0).setMaxWidth(70);
+		sentMessagesTable.getColumnModel().getColumn(1).setPreferredWidth(58);
+		sentMessagesTable.getColumnModel().getColumn(1).setMaxWidth(72);
 		history.add(new JScrollPane(sentMessagesTable), BorderLayout.CENTER);
-		JButton refresh = new JButton("Atualizar");
+		JButton refresh = new JButton(createUiIcon("refresh"));
+		refresh.setToolTipText("Atualizar mensagens");
 		refresh.addActionListener(event -> refreshSentMessagesAction.run());
-		JButton resend = new JButton("Reenviar");
+		JButton resend = new JButton(createUiIcon("resend"));
+		resend.setToolTipText("Reenviar mensagem selecionada");
 		resend.addActionListener(event -> withSelectedSentMessage(resendSentMessageAction));
-		JButton remove = new JButton("Remover");
+		JButton remove = new JButton(createUiIcon("trash"));
+		remove.setToolTipText("Remover mensagem selecionada");
 		remove.addActionListener(event -> withSelectedSentMessage(deleteSentMessageAction));
-		JButton togglePinned = new JButton("Fixar / Desfixar");
+		JButton togglePinned = new JButton(createUiIcon("pin"));
+		togglePinned.setToolTipText("Fixar ou desfixar broadcast selecionado");
 		togglePinned.addActionListener(event -> withSelectedSentMessage(togglePinnedMessageAction));
-		JPanel historyActions = new JPanel(new GridLayout(4, 1, 3, 3));
+		JPanel historyActions = new JPanel(new GridLayout(1, 4, 3, 0));
 		historyActions.add(refresh);
 		historyActions.add(resend);
 		historyActions.add(togglePinned);
@@ -231,12 +450,18 @@ final class ClanMessagesPanel extends PluginPanel
 		split.setResizeWeight(0.48);
 		split.setBorder(null);
 		JTabbedPane staffSections = new JTabbedPane();
+		staffSections.addTab("Pedidos", rankRequestsTab);
 		staffSections.addTab("Mensagens", split);
 		staffSections.addTab("MVP", mvpManagementTab);
+		configureStaffTabs(staffSections,
+			new String[]{"Mensagens da staff", "Solicitações de rank", "Gerenciar membros MVP"},
+			new String[]{"message", "requests", "trophy"});
 		staffTab.add(staffSections, BorderLayout.CENTER);
 
 		JPanel security = new JPanel(new BorderLayout(4, 4));
-		security.setBorder(BorderFactory.createTitledBorder("Seguranca da staff"));
+		security.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(55, 55, 55)));
+		JButton securityToggle = new JButton("▸ Segurança da staff");
+		securityToggle.setHorizontalAlignment(javax.swing.SwingConstants.LEFT);
 		JPasswordField staffAccessKey = new JPasswordField(
 			initialStaffAccessKey == null ? "" : initialStaffAccessKey);
 		staffAccessKey.setToolTipText("Chave administrativa configurada no servidor");
@@ -258,8 +483,20 @@ final class ClanMessagesPanel extends PluginPanel
 		JPanel securityFooter = new JPanel(new BorderLayout(4, 4));
 		securityFooter.add(saveStaffKey, BorderLayout.NORTH);
 		securityFooter.add(staffKeyStatus, BorderLayout.SOUTH);
-		security.add(staffAccessKey, BorderLayout.CENTER);
-		security.add(securityFooter, BorderLayout.SOUTH);
+		JPanel securityContent = new JPanel(new BorderLayout(4, 4));
+		securityContent.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+		securityContent.add(staffAccessKey, BorderLayout.CENTER);
+		securityContent.add(securityFooter, BorderLayout.SOUTH);
+		securityContent.setVisible(false);
+		securityToggle.addActionListener(event ->
+		{
+			boolean show = !securityContent.isVisible();
+			securityContent.setVisible(show);
+			securityToggle.setText(show ? "▾ Segurança da staff" : "▸ Segurança da staff");
+			security.revalidate();
+		});
+		security.add(securityToggle, BorderLayout.NORTH);
+		security.add(securityContent, BorderLayout.CENTER);
 		staffTab.add(security, BorderLayout.SOUTH);
 	}
 
@@ -280,20 +517,37 @@ final class ClanMessagesPanel extends PluginPanel
 		{
 			mvpTab.setStaff(authenticated && staff);
 			liveOnTab.setStaff(authenticated && staff);
-			tabs.removeAll();
+			mainArea.removeAll();
+			mainCards.removeAll();
+			navigationGrid.removeAll();
+			navigationButtons.clear();
 			if (!authenticated)
 			{
-				tabs.addTab("Acesso", accessTab);
+				mainCards.add(accessTab, "access");
+				mainArea.add(mainCards, BorderLayout.CENTER);
+				mainCardsLayout.show(mainCards, "access");
+				mainArea.revalidate();
+				mainArea.repaint();
 				return;
 			}
-			tabs.addTab("MVP's", mvpTab);
-			tabs.addTab("Ranks", ranksTab);
-			tabs.addTab("Live ON", liveOnTab);
+			addNavigationButton("MVP", "trophy", mvpTab, "mvp", "Ranking MVP");
+			addNavigationButton("Ranks", "ranks", ranksTab, "ranks", "Solicitação de ranks");
+			addNavigationButton("Live ON", "live", liveOnTab, "live", "Lives online");
 			if (staff)
 			{
-				tabs.addTab("Staff", staffTab);
-				tabs.addTab("Solicitações", rankRequestsTab);
+				addNavigationButton("Staff", "key", staffTab, "staff", "Abrir painel da staff");
 			}
+			else
+			{
+				JPanel filler = new JPanel();
+				filler.setOpaque(false);
+				navigationGrid.add(filler);
+			}
+			mainArea.add(navigationGrid, BorderLayout.NORTH);
+			mainArea.add(mainCards, BorderLayout.CENTER);
+			selectPage("mvp");
+			mainArea.revalidate();
+			mainArea.repaint();
 		});
 	}
 
@@ -332,9 +586,21 @@ final class ClanMessagesPanel extends PluginPanel
 	{
 		mvpTab.updateEfficiencyRankings(ehb, ehp);
 	}
-	void updateRanks(String currentRank, String possibleRank, java.util.List<String> checks, String advice) { ranksTab.update(currentRank, possibleRank, checks, advice); }
+	void updateRanks(String playerName, String clanRank, javax.swing.Icon clanRankIcon,
+		String evaluatedRank, javax.swing.Icon evaluatedRankIcon,
+		String possibleRank, javax.swing.Icon possibleRankIcon, java.util.List<String> nextChecks,
+		java.util.List<String> overviewChecks, String advice)
+	{
+		ranksTab.update(playerName, clanRank, clanRankIcon, evaluatedRank, evaluatedRankIcon,
+			possibleRank, possibleRankIcon,
+			nextChecks, overviewChecks, advice);
+	}
 	void clearRankDetails() { ranksTab.clearDetails(); }
 	void resetRanks() { ranksTab.reset(); }
+	void setRankRequestState(boolean pending, int cooldownSeconds)
+	{
+		ranksTab.setRankRequestState(pending, cooldownSeconds);
+	}
 	void setStatus(String text)
 	{
 		SwingUtilities.invokeLater(() ->
@@ -398,7 +664,9 @@ final class ClanMessagesPanel extends PluginPanel
 			sentMessagesModel.setRowCount(0);
 			for (StaffSentMessage sentMessage : sentMessages)
 			{
-				sentMessagesModel.addRow(new Object[]{sentMessage.mode, sentMessage.isPinned() ? "Sim" : "", sentMessage.message});
+				String compactMode = "CLAN".equalsIgnoreCase(sentMessage.mode) ? "Clan" : "Broadcast";
+				if (sentMessage.isPinned()) compactMode += " •";
+				sentMessagesModel.addRow(new Object[]{sentMessage.author == null ? "—" : sentMessage.author, compactMode, sentMessage.message});
 			}
 			sentMessagesStatus.setText(sentMessages.size() + " mensagem(ns)");
 		});
@@ -423,6 +691,7 @@ final class ClanMessagesPanel extends PluginPanel
 	static final class StaffSentMessage
 	{
 		String id;
+		String author;
 		String message;
 		String mode;
 		Object pinned;

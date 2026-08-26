@@ -1,6 +1,7 @@
 package com.liveon;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.GridLayout;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +38,8 @@ final class MvpManagementPanel extends JPanel
 		form.add(new JLabel("Nome do membro"));
 		form.add(rsn);
 		JButton save = new JButton("Adicionar MVP");
+		save.setBackground(new Color(190, 104, 0));
+		save.setForeground(Color.WHITE);
 		save.addActionListener(event -> saveAction.accept(rsn.getText().trim()));
 		form.add(save);
 		add(form, BorderLayout.NORTH);
@@ -46,7 +49,8 @@ final class MvpManagementPanel extends JPanel
 
 		JButton refresh = new JButton("Atualizar");
 		refresh.addActionListener(event -> refreshAction.run());
-		JButton remove = new JButton("Remover selecionado");
+		JButton remove = new JButton("Remover");
+		remove.setToolTipText("Remover membro MVP selecionado");
 		remove.addActionListener(event ->
 		{
 			int row = table.getSelectedRow();
@@ -57,7 +61,7 @@ final class MvpManagementPanel extends JPanel
 			}
 			deleteAction.accept(members.get(row));
 		});
-		JPanel actions = new JPanel(new GridLayout(2, 1, 3, 3));
+		JPanel actions = new JPanel(new GridLayout(1, 2, 3, 0));
 		actions.add(refresh);
 		actions.add(remove);
 		JPanel footer = new JPanel(new BorderLayout(3, 3));

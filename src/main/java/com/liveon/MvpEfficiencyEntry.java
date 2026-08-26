@@ -9,5 +9,5 @@ final class MvpEfficiencyEntry
 	@SerializedName("player_name")
 	private String playerName;
 	private double gained;
+	private MvpEfficiencyContribution[] breakdown;
 }
-

@@ -59,6 +59,8 @@ final class LiveOnPanel extends JPanel
 		fields.add(new JLabel("Canal da Twitch"));
 		fields.add(twitch);
 		JButton save = new JButton("Associar / Atualizar");
+		save.setBackground(new Color(190, 104, 0));
+		save.setForeground(Color.WHITE);
 		save.addActionListener(event -> saveAction.accept(rsn.getText().trim(), twitch.getText().trim()));
 		fields.add(save);
 		staffManagement.add(fields, BorderLayout.NORTH);
@@ -67,7 +69,8 @@ final class LiveOnPanel extends JPanel
 		staffManagement.add(new JScrollPane(table), BorderLayout.CENTER);
 		JButton refresh = new JButton("Atualizar");
 		refresh.addActionListener(event -> refreshAction.run());
-		JButton remove = new JButton("Remover selecionado");
+		JButton remove = new JButton("Remover");
+		remove.setToolTipText("Remover canal selecionado");
 		remove.addActionListener(event ->
 		{
 			int row = table.getSelectedRow();
@@ -78,7 +81,7 @@ final class LiveOnPanel extends JPanel
 			}
 			deleteAction.accept(managedChannels.get(row));
 		});
-		JPanel actions = new JPanel(new GridLayout(2, 1, 3, 3));
+		JPanel actions = new JPanel(new GridLayout(1, 2, 3, 0));
 		actions.add(refresh);
 		actions.add(remove);
 		JPanel footer = new JPanel(new BorderLayout(3, 3));
@@ -156,6 +159,8 @@ final class LiveOnPanel extends JPanel
 		card.add(name, BorderLayout.NORTH);
 		card.add(new JLabel(channel.url), BorderLayout.CENTER);
 		JButton open = new JButton("Abrir live");
+		open.setBackground(new Color(190, 104, 0));
+		open.setForeground(Color.WHITE);
 		open.addActionListener(event -> LinkBrowser.browse(channel.url));
 		card.add(open, BorderLayout.SOUTH);
 		return card;

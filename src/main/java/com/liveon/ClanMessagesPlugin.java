@@ -27,17 +27,18 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.MenuAction;
+import net.runelite.api.Quest;
+import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
 import net.runelite.api.ScriptID;
 import net.runelite.api.WorldType;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Item;
 import net.runelite.api.InventoryID;
-import net.runelite.api.clan.ClanChannel;
-import net.runelite.api.clan.ClanChannelMember;
 import net.runelite.api.clan.ClanRank;
 import net.runelite.api.clan.ClanTitle;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
@@ -52,13 +53,15 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ScriptPreFired;
-import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.events.ConfigChanged;
 import javax.swing.JOptionPane;
+import javax.swing.Icon;
+import javax.swing.ImageIcon;
 import javax.swing.SwingUtilities;
 import net.runelite.client.events.NpcLootReceived;
 import net.runelite.client.game.ItemManager;
@@ -70,7 +73,6 @@ import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.LinkBrowser;
-import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
@@ -92,11 +94,12 @@ public class ClanMessagesPlugin extends Plugin
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
-	private static final int QUEST_CAPE_POINTS_REQUIRED = 339;
 
 	// Mapping Portuguese rank names (lowercase) to clan title names used in-game
 	private static final Map<String, String> RANK_TITLE_ALIASES = new LinkedHashMap<>();
 	static {
+		RANK_TITLE_ALIASES.put("recruta", "Helper");
+		RANK_TITLE_ALIASES.put("soldado", "Recruit");
 		RANK_TITLE_ALIASES.put("cabo", "Corporal");
 		RANK_TITLE_ALIASES.put("aluno", "Novice");
 		RANK_TITLE_ALIASES.put("sargento", "Sergeant");
@@ -147,25 +150,27 @@ public class ClanMessagesPlugin extends Plugin
 	private int lastCombatAchievementPoints = -1;
 	private String combatAchievementAccount = "";
 	private int lastQuestPoints = -1;
+	private int lastMaximumQuestPoints = -1;
 	private String questAccount = "";
 	private boolean rankSyncCompleted;
 	private boolean rankWidgetRefreshPending;
+	private final java.util.Set<String> rankBankItems = new java.util.HashSet<>();
+	private final java.util.Set<Integer> rankBankItemIds = new java.util.HashSet<>();
+	private String rankBankAccount = "";
+	private boolean rankBankLoaded;
 	private ScheduledFuture<?> rankRequestsPollingTask;
 	private ScheduledFuture<?> mvpDropsPollingTask;
 	// If true, the user manually disconnected and auto-verification should be paused until they click Verify
 	private final java.util.Map<String, LiveChannel> onlineLiveChannels = new java.util.concurrent.ConcurrentHashMap<>();
 	private final java.util.Set<String> mvpMembers = java.util.concurrent.ConcurrentHashMap.newKeySet();
-	private int liveChatIconId = -1;
-	private int mvpChatIconId = -1;
+	private ClanLiveBadgeDecorator clanLiveBadgeDecorator;
 
 	@Override
 	protected void startUp()
 	{
 		executor = Executors.newSingleThreadScheduledExecutor();
 		RankVisuals.registerChatIcons(chatIconManager);
-		liveChatIconId = registerGreenLiveIcon();
-		mvpChatIconId = chatIconManager.registerChatIcon(
-			ImageUtil.loadImageResource(getClass(), "/chat/mvp.png"));
+		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, config.staffAccessKey(), this::saveStaffAccessKey);
 		panel.clearRankDetails();
 		if (config.enabled())
@@ -205,6 +210,11 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			clientToolbar.removeNavigation(navigationButton);
 		}
+		if (clanLiveBadgeDecorator != null)
+		{
+			clanLiveBadgeDecorator.clearDecorations();
+			clanLiveBadgeDecorator = null;
+		}
 		okhttp3.Call womCall = currentWomCall;
 		if (womCall != null)
 		{
@@ -216,8 +226,6 @@ public class ClanMessagesPlugin extends Plugin
 		isStaff = false;
 		onlineLiveChannels.clear();
 		mvpMembers.clear();
-		liveChatIconId = -1;
-		mvpChatIconId = -1;
 		panel = null;
 	}
 
@@ -340,8 +348,7 @@ public class ClanMessagesPlugin extends Plugin
 			if (config.discordDropsEnabled() && client.getLocalPlayer() != null)
 			{
 				String player = client.getLocalPlayer().getName();
-				if (config.discordDropScreenshot()) drawManager.requestNextFrameListener(image -> sendPetNotification(player, image));
-				else sendPetNotification(player, null);
+				drawManager.requestNextFrameListener(image -> sendPetNotification(player, image));
 			}
 			return;
 		}
@@ -375,36 +382,40 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		StringBuilder badges = new StringBuilder();
-		if (isMvp && mvpChatIconId >= 0)
+		if (isMvp)
 		{
-			badges.append("<img=").append(chatIconManager.chatIconIndex(mvpChatIconId)).append(">");
+			badges.append(" <col=ffc628>MVP</col>");
 		}
-		if (isLive && liveChatIconId >= 0)
+		if (isLive)
 		{
-			badges.append("<img=").append(chatIconManager.chatIconIndex(liveChatIconId)).append(">");
+			badges.append(" <col=96ffaa>LIVE</col>");
 		}
-		if (badges.length() > 0 && !sender.startsWith(badges.toString()))
+		int colonIndex = sender.lastIndexOf(':');
+		if (badges.length() > 0 && colonIndex >= 0 && !sender.contains(badges.toString()))
 		{
-			objectStack[1] = badges + sender;
+			// Keep the native clan rank at the beginning and place our optional
+			// badges after the sender name, immediately before the chat colon.
+			objectStack[1] = sender.substring(0, colonIndex) + badges
+				+ sender.substring(colonIndex);
 		}
 	}
 
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
-		notifyDiscordDrop(event.getNpc().getName(), event.getItems());
+		notifyDiscordDrop(event.getNpc().getName(), event.getItems(), "NPC", event.getNpc().getId());
 	}
 
 	@Subscribe
 	public void onLootReceived(LootReceived event)
 	{
-		if (event.getType() != LootRecordType.NPC)
+		if (event.getType() != LootRecordType.NPC && event.getType() != LootRecordType.PLAYER)
 		{
-			notifyDiscordDrop(event.getName(), event.getItems());
+			notifyDiscordDrop(event.getName(), event.getItems(), event.getType().name(), null);
 		}
 	}
 
-	private void notifyDiscordDrop(String source, Collection<ItemStack> items)
+	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category, Integer npcId)
 	{
 		if (items.isEmpty() || isTemporaryLootWorld()) return;
 		long totalValue = 0;
@@ -415,7 +426,7 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		if (config.statsEnabled() && totalValue >= 1_000_000L)
 		{
-			submitDropStats(items, source, totalValue);
+			submitDropStats(items, source);
 		}
 		long minimumValue = Math.max(0, config.discordDropMinimumValue());
 		if (!config.discordDropsEnabled())
@@ -423,6 +434,7 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		List<String> notableItems = new ArrayList<>();
+		List<Map<String, Object>> dinkItems = new ArrayList<>();
 		int thumbnailItemId = -1;
 		for (ItemStack item : items)
 		{
@@ -438,6 +450,14 @@ public class ClanMessagesPlugin extends Plugin
 			String itemName = itemManager.getItemComposition(item.getId()).getName();
 			String displayName = item.getQuantity() > 1 ? item.getQuantity() + " x " + itemName : itemName;
 			notableItems.add(discordWikiLink(displayName, itemName));
+			Map<String, Object> dinkItem = new LinkedHashMap<>();
+			dinkItem.put("id", item.getId());
+			dinkItem.put("quantity", item.getQuantity());
+			dinkItem.put("priceEach", itemManager.getItemPrice(item.getId()));
+			dinkItem.put("name", itemName);
+			dinkItem.put("criteria", java.util.Collections.singletonList("VALUE"));
+			dinkItem.put("rarity", null);
+			dinkItems.add(dinkItem);
 		}
 		if (notableItems.isEmpty())
 		{
@@ -448,14 +468,8 @@ public class ClanMessagesPlugin extends Plugin
 		String description = "Just got " + joinNaturalLanguage(notableItems) + " from "
 			+ discordWikiLink(sourceName, sourceName);
 		final int dropThumbnailItemId = thumbnailItemId;
-		if (config.discordDropScreenshot())
-		{
-			drawManager.requestNextFrameListener(image -> sendDiscordDrop(playerName, description, dropThumbnailItemId, image));
-		}
-		else
-		{
-			sendDiscordDrop(playerName, description, dropThumbnailItemId, null);
-		}
+		drawManager.requestNextFrameListener(image -> sendDiscordDrop(playerName, description,
+			dropThumbnailItemId, sourceName, category, npcId, dinkItems, image));
 	}
 
 	private static String discordWikiLink(String label, String search)
@@ -522,17 +536,42 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		combatAchievementAccount = "";
 		lastQuestPoints = -1;
+		lastMaximumQuestPoints = -1;
 		questAccount = "";
 		rankWidgetRefreshPending = false;
 		rankSyncCompleted = false;
+		rankBankItems.clear();
+		rankBankItemIds.clear();
+		rankBankAccount = "";
+		rankBankLoaded = false;
 		if (panel != null) panel.resetRanks();
 	}
 
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
-		if (event.getContainerId() == InventoryID.INVENTORY.getId()
+		if (event.getContainerId() == InventoryID.BANK.getId())
+		{
+			if (client.getLocalPlayer() == null) return;
+			ensureRankBankAccount(client.getLocalPlayer().getName());
+			rankBankItems.clear();
+			rankBankItemIds.clear();
+			collectItemNames(event.getItemContainer(), rankBankItems);
+			collectItemIds(event.getItemContainer(), rankBankItemIds);
+			rankBankLoaded = true;
+			refreshRanksAutomatically();
+		}
+		else if (event.getContainerId() == InventoryID.INVENTORY.getId()
 			|| event.getContainerId() == InventoryID.EQUIPMENT.getId())
+		{
+			refreshRanksAutomatically();
+		}
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (event.getVarbitId() == VarbitID.CA_POINTS)
 		{
 			refreshRanksAutomatically();
 		}
@@ -576,12 +615,19 @@ public class ClanMessagesPlugin extends Plugin
 	private void refreshRanksOnClientThread(boolean explicitSync)
 	{
 		if (panel == null || client.getLocalPlayer() == null) return;
+		String accountName = client.getLocalPlayer().getName();
+		ensureRankBankAccount(accountName);
 		java.util.Set<String> items = new java.util.HashSet<>();
 		java.util.Set<Integer> itemIds = new java.util.HashSet<>();
 		collectItemNames(client.getItemContainer(InventoryID.INVENTORY), items);
 		collectItemNames(client.getItemContainer(InventoryID.EQUIPMENT), items);
 		collectItemIds(client.getItemContainer(InventoryID.INVENTORY), itemIds);
 		collectItemIds(client.getItemContainer(InventoryID.EQUIPMENT), itemIds);
+		if (rankBankLoaded)
+		{
+			items.addAll(rankBankItems);
+			itemIds.addAll(rankBankItemIds);
+		}
 		log.debug("Ranks sync inventory/equipment item ids: {}", itemIds);
 		int totalLevel = 0;
 		for (Skill skill : Skill.values()) totalLevel += client.getRealSkillLevel(skill);
@@ -606,19 +652,20 @@ public class ClanMessagesPlugin extends Plugin
 			ItemID.SKILLCAPE_MAX_DIZANAS_TROUVER_MANGLED);
 		boolean infernalCape = containsAnyItemId(itemIds, ItemID.INFERNAL_CAPE, ItemID.INFERNAL_CAPE_BROKEN)
 			|| infernalMaxCape
-			|| zukHelm || containsItem(items, "Infernal cape");
-		boolean fireCape = containsItemId(itemIds, ItemID.TZHAAR_CAPE_FIRE) || infernalCape;
+			|| zukHelm || containsItemVariant(items, "Infernal cape");
+		boolean fireCape = containsItemId(itemIds, ItemID.TZHAAR_CAPE_FIRE)
+			|| containsItemVariant(items, "Fire cape") || infernalCape;
 		boolean quiver = containsAnyItemId(itemIds, ItemID.DIZANAS_QUIVER_UNCHARGED, ItemID.DIZANAS_QUIVER_CHARGED,
 			ItemID.DIZANAS_QUIVER_INFINITE, ItemID.DIZANAS_QUIVER_UNCHARGED_TROUVER,
 			ItemID.DIZANAS_QUIVER_CHARGED_TROUVER, ItemID.DIZANAS_QUIVER_INFINITE_TROUVER)
-			|| dizanasMaxCape || zukHelm;
-		String accountName = client.getLocalPlayer().getName();
+			|| dizanasMaxCape || zukHelm || containsItemVariant(items, "Dizana's quiver");
 		if (!accountName.equals(questAccount))
 		{
 			questAccount = accountName;
 			lastQuestPoints = -1;
+			lastMaximumQuestPoints = -1;
 		}
-		int questPoints = readQuestPoints();
+		int questPoints = explicitSync || lastQuestPoints < 0 ? readQuestPoints() : lastQuestPoints;
 		if (questPoints >= 0) lastQuestPoints = questPoints;
 		else questPoints = lastQuestPoints;
 		String accountKey = "combatAchievementPoints.v2." + accountCacheKey(accountName);
@@ -644,7 +691,7 @@ public class ClanMessagesPlugin extends Plugin
 		boolean eliteCombatAchievements = combatAchievementPoints >= 1075 || tzTokHelm;
 		boolean masterCombatAchievements = combatAchievementPoints >= 1945 || vampyricHelm || zukHelm;
 		boolean grandmasterCombatAchievements = combatAchievementPoints >= 2671 || zukHelm;
-		boolean questCape = questPoints >= QUEST_CAPE_POINTS_REQUIRED
+		boolean questCape = (lastMaximumQuestPoints > 0 && questPoints >= lastMaximumQuestPoints)
 			|| containsAnyItemId(itemIds, ItemID.SKILLCAPE_QP, ItemID.SKILLCAPE_QP_TRIMMED)
 			|| containsAnyItem(items, "Quest point cape", "Quest point cape (t)");
 		boolean diaryCape = containsAnyItemId(itemIds, ItemID.SKILLCAPE_AD, ItemID.SKILLCAPE_AD_TRIMMED)
@@ -654,7 +701,7 @@ public class ClanMessagesPlugin extends Plugin
 			|| containsAnyItem(items, "Max cape", "Max cape (t)");
 		boolean maxCape = totalLevel >= 2376 || maxCapeItem;
 		int effectiveTotalLevel = maxCapeItem ? Math.max(totalLevel, 2376) : totalLevel;
-		int effectiveQuestPoints = questCape ? Math.max(QUEST_CAPE_POINTS_REQUIRED, questPoints) : questPoints;
+		int effectiveQuestPoints = questCape ? Math.max(300, questPoints) : questPoints;
 		log.debug("Ranks quest detection: questPoints={}, questCape={}", questPoints, questCape);
 		checks.add("Total level: " + effectiveTotalLevel + (effectiveTotalLevel >= 2376 ? " ✓ (Max)" : effectiveTotalLevel >= 2300 ? " ✓ (2300+)" : " — requer 2300"));
 		checks.add("Quest points: " + (questPoints < 0 ? "— abra o Character Summary e sincronize" : questPoints));
@@ -674,14 +721,6 @@ public class ClanMessagesPlugin extends Plugin
 		checks.add("Passo 4: abra a página do Inferno no Collection Log para conferir o registro local.");
 		checks.add("EHB não é considerado no cálculo dos ranks.");
 		checks.add("Combat Achievements: sincronize com a aba correspondente aberta.");
-		java.util.List<String> summaryChecks = new ArrayList<>();
-		summaryChecks.add("Total level: " + (effectiveTotalLevel > 0 ? "✓ " + effectiveTotalLevel : "— leitura pendente") + (effectiveTotalLevel >= 2376 ? " (2376 total)" : ""));
-		summaryChecks.add(questSummary(questPoints, questCape));
-		summaryChecks.add(itemStatus("Fire cape", fireCape));
-		summaryChecks.add(itemStatus("Infernal cape", infernalCape));
-		summaryChecks.add(itemStatus("Dizana's quiver", quiver));
-		summaryChecks.add(combatAchievementSummary(combatAchievementPoints, tzTokHelm, vampyricHelm, zukHelm));
-		summaryChecks.add("Diary cape: " + (diaryCape ? "✓" : "— requisito pendente"));
 		String rank = highestPossibleRank(effectiveTotalLevel, effectiveQuestPoints, questCape, fireCape, infernalCape, quiver,
 			diaryCape, maxCape, easyCombatAchievements, mediumCombatAchievements, hardCombatAchievements,
 			eliteCombatAchievements, masterCombatAchievements, grandmasterCombatAchievements);
@@ -689,19 +728,307 @@ public class ClanMessagesPlugin extends Plugin
 			fireCape, infernalCape, quiver, diaryCape, maxCape, easyCombatAchievements, mediumCombatAchievements,
 			hardCombatAchievements, eliteCombatAchievements, masterCombatAchievements, grandmasterCombatAchievements) : "";
 		String displayedRank = rankSyncCompleted ? rank : "não sincronizado";
-		String nextRank = rankSyncCompleted ? nextRankFromAdvice(rank, advice) : "em análise";
-		panel.updateRanks(displayedRank, nextRank, summaryChecks, advice);
+		String clanRank = currentClanRankTitle(accountName);
+		String nextRank = rankSyncCompleted ? nextRegularRankTarget(clanRank, rank) : "em análise";
+		java.util.List<String> nextChecks = rankSyncCompleted
+			? missingRequirements(requirementsForRank(nextRank, effectiveTotalLevel, questPoints, questCape, fireCape,
+				infernalCape, quiver, diaryCape, maxCape, rankBankLoaded, combatAchievementPoints,
+				easyCombatAchievements, mediumCombatAchievements, hardCombatAchievements,
+				eliteCombatAchievements, masterCombatAchievements, grandmasterCombatAchievements))
+			: java.util.Collections.emptyList();
+		java.util.List<String> overviewChecks = rankSyncCompleted
+			? rankOverviewChecks(effectiveTotalLevel, questPoints, questCape, fireCape, infernalCape, quiver,
+				diaryCape, maxCape, rankBankLoaded, combatAchievementPoints, easyCombatAchievements,
+				mediumCombatAchievements, hardCombatAchievements, eliteCombatAchievements,
+				masterCombatAchievements, grandmasterCombatAchievements)
+			: java.util.Collections.emptyList();
+		panel.updateRanks(accountName, clanRank, currentClanRankIcon(accountName),
+			displayedRank, clanRankIconFor(displayedRank), nextRank, clanRankIconFor(nextRank),
+			nextChecks, overviewChecks, advice);
+		if (explicitSync) fetchRankRequestStatus();
 	}
 
-	private static String nextRankFromAdvice(String simulatedRank, String advice)
+	private Icon clanRankIconFor(String displayRank)
 	{
-		if ("Coronel".equals(simulatedRank)) return "Rank máximo atingido";
-		Matcher matcher = Pattern.compile("Próximo rank:\\s*([^<]+)").matcher(advice == null ? "" : advice);
-		return matcher.find() ? matcher.group(1).trim() : "em análise";
+		if (displayRank == null || displayRank.trim().isEmpty()) return null;
+		String rankKey = displayRank.trim().toLowerCase(java.util.Locale.ROOT);
+		// "General" is the clan's final Discord-only rank and uses the native
+		// Brigadier emblem. "Major" continues to use the native General title.
+		String titleKey = rankKey.startsWith("general")
+			? "brigadier"
+			: RANK_TITLE_ALIASES.getOrDefault(rankKey, displayRank).trim().toLowerCase(java.util.Locale.ROOT);
+		net.runelite.api.clan.ClanSettings settings = client.getClanSettings();
+		if (settings == null) return null;
+		for (int rankValue = -1; rankValue <= 127; rankValue++)
+		{
+			ClanTitle title = settings.titleForRank(new ClanRank(rankValue));
+			if (title == null || title.getName() == null || !title.getName().trim().toLowerCase(java.util.Locale.ROOT).equals(titleKey)) continue;
+			BufferedImage image = chatIconManager.getRankImage(title);
+			if (image == null) return null;
+			java.awt.Image scaled = image.getScaledInstance(20, 20, java.awt.Image.SCALE_SMOOTH);
+			return new ImageIcon(scaled);
+		}
+		return null;
+	}
+
+	private Icon currentClanRankIcon(String playerName)
+	{
+		net.runelite.api.clan.ClanSettings settings = client.getClanSettings();
+		if (settings == null) return null;
+		net.runelite.api.clan.ClanMember member = settings.findMember(playerName);
+		if (member == null || member.getRank() == null) return null;
+		ClanTitle title = settings.titleForRank(member.getRank());
+		if (title == null) return null;
+		BufferedImage image = chatIconManager.getRankImage(title);
+		if (image == null) return null;
+		java.awt.Image scaled = image.getScaledInstance(20, 20, java.awt.Image.SCALE_SMOOTH);
+		return new ImageIcon(scaled);
+	}
+
+	private String currentClanRankTitle(String playerName)
+	{
+		net.runelite.api.clan.ClanSettings settings = client.getClanSettings();
+		if (settings == null) return "Carregando…";
+		net.runelite.api.clan.ClanMember member = settings.findMember(playerName);
+		if (member == null || member.getRank() == null) return "Não identificado";
+		ClanTitle title = settings.titleForRank(member.getRank());
+		if (title != null && title.getName() != null && !title.getName().trim().isEmpty())
+		{
+			log.debug("Clan rank detection for {}: rankValue={}, titleId={}, title={}",
+				playerName, member.getRank().getRank(), title.getId(), title.getName());
+			String name = title.getName().trim();
+			// Some clan configurations expose the Brigadier emblem with the textual
+			// title "General". Identify the final rank by its native emblem so it is
+			// not confused with the clan's Major progression rank.
+			if (name.equalsIgnoreCase("general") && clanTitleUsesIcon(settings, title, "brigadier"))
+			{
+				return "General";
+			}
+				switch (name.toLowerCase(java.util.Locale.ROOT))
+				{
+				case "helper": return "Recruta";
+				case "recruit": return "Soldado";
+				case "private": return "Soldado";
+				case "corporal": return "Cabo";
+				case "novice": return "Aluno";
+				case "sergeant": return "Sargento";
+				case "cadet": return "Cadete";
+				case "lieutenant": return "Tenente";
+				case "captain": return "Capitão";
+				case "general": return "Major";
+				case "colonel": return "Coronel";
+				case "brigadier": return "General";
+				default: return name;
+			}
+		}
+		ClanRank rank = member.getRank();
+		if (rank.equals(ClanRank.OWNER)) return "Owner";
+		if (rank.equals(ClanRank.DEPUTY_OWNER)) return "Deputy Owner";
+		if (rank.equals(ClanRank.ADMINISTRATOR)) return "Administrador";
+		if (rank.equals(ClanRank.GUEST)) return "Recruta";
+		return "Rank " + rank.getRank();
+	}
+
+	private boolean clanTitleUsesIcon(net.runelite.api.clan.ClanSettings settings,
+		net.runelite.api.clan.ClanTitle currentTitle, String expectedTitleName)
+	{
+		BufferedImage currentImage = chatIconManager.getRankImage(currentTitle);
+		if (currentImage == null) return false;
+		for (int rankValue = -1; rankValue <= 127; rankValue++)
+		{
+			ClanTitle candidate = settings.titleForRank(new ClanRank(rankValue));
+			if (candidate == null || candidate.getName() == null
+				|| !candidate.getName().trim().equalsIgnoreCase(expectedTitleName))
+			{
+				continue;
+			}
+			BufferedImage candidateImage = chatIconManager.getRankImage(candidate);
+			return sameImage(currentImage, candidateImage);
+		}
+		return false;
+	}
+
+	private static boolean sameImage(BufferedImage first, BufferedImage second)
+	{
+		if (first == null || second == null || first.getWidth() != second.getWidth()
+			|| first.getHeight() != second.getHeight())
+		{
+			return false;
+		}
+		for (int y = 0; y < first.getHeight(); y++)
+		{
+			for (int x = 0; x < first.getWidth(); x++)
+			{
+				if (first.getRGB(x, y) != second.getRGB(x, y)) return false;
+			}
+		}
+		return true;
+	}
+
+	private static final java.util.List<String> REGULAR_RANKS = java.util.Arrays.asList(
+		"recruta", "soldado", "cabo", "aluno", "sargento", "cadete",
+		"tenente", "capitão", "major", "coronel");
+
+	private static int regularRankIndex(String rank)
+	{
+		String normalized = rank == null ? "" : rank.trim().toLowerCase(java.util.Locale.ROOT);
+		if (normalized.equals("helper") || normalized.equals("membro") || normalized.equals("member")) return 0;
+		if (normalized.equals("recruit") || normalized.equals("soldier") || normalized.equals("private")) return 1;
+		if (normalized.equals("corporal")) return 2;
+		if (normalized.equals("novice")) return 3;
+		if (normalized.equals("sergeant")) return 4;
+		if (normalized.equals("cadet")) return 5;
+		if (normalized.equals("lieutenant")) return 6;
+		if (normalized.equals("captain")) return 7;
+		if (normalized.equals("general")) return 8;
+		if (normalized.equals("colonel")) return 9;
+		for (int index = 0; index < REGULAR_RANKS.size(); index++)
+		{
+			if (normalized.equals(REGULAR_RANKS.get(index))) return index;
+		}
+		return -1;
+	}
+
+	private static String nextRegularRankTarget(String currentRank, String eligibleRank)
+	{
+		int current = regularRankIndex(currentRank);
+		int eligible = regularRankIndex(eligibleRank);
+		if (current < 0) return "Cargo especial";
+		int base = Math.max(current, eligible);
+		if (base >= REGULAR_RANKS.size() - 1) return "General — somente via Discord";
+		String target = REGULAR_RANKS.get(base + 1);
+		return target.substring(0, 1).toUpperCase(java.util.Locale.ROOT) + target.substring(1);
+	}
+
+	private static java.util.List<String> missingRequirements(java.util.List<String> requirements)
+	{
+		java.util.List<String> missing = new ArrayList<>();
+		for (String requirement : requirements)
+		{
+			if (!requirement.trim().startsWith("✓")) missing.add(requirement);
+		}
+		return missing;
+	}
+
+	private static java.util.List<String> rankOverviewChecks(int totalLevel, int questPoints, boolean questCape,
+		boolean fireCape, boolean infernalCape, boolean quiver, boolean diaryCape, boolean maxCape,
+		boolean bankLoaded, int combatAchievementPoints, boolean easy, boolean medium, boolean hard,
+		boolean elite, boolean master, boolean grandmaster)
+	{
+		java.util.List<String> result = new ArrayList<>();
+		if (!bankLoaded) result.add("! Abra o banco uma vez para verificar todos os itens");
+		result.add(pointsRequirement("Quest points", questPoints, 300, "aguarde o login carregar"));
+		result.add(itemRequirement("Quest cape", questCape, bankLoaded));
+		result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
+		result.add(itemRequirement("Infernal cape", infernalCape, bankLoaded));
+		result.add(itemRequirement("Dizana's quiver", quiver, bankLoaded));
+		result.add(itemRequirement("Diary cape", diaryCape, bankLoaded));
+		if (maxCape)
+		{
+			result.add("✓ Max cape / 2376 total atendido");
+		}
+		else
+		{
+			result.add("✕ Total level: " + totalLevel + "/2376 — equivalente à Max cape");
+		}
+		String caTier = grandmaster ? "Grandmaster" : master ? "Master" : elite ? "Elite"
+			: hard ? "Hard" : medium ? "Medium" : easy ? "Easy" : "Nenhum tier";
+		if (combatAchievementPoints < 0)
+			result.add("! Combat Achievements ainda não carregado");
+		else
+			result.add((easy ? "✓ " : "✕ ") + "Combat Achievements: " + caTier
+				+ " (" + combatAchievementPoints + " pontos)");
+		return result;
+	}
+
+	private static java.util.List<String> requirementsForRank(String rank, int totalLevel, int questPoints,
+		boolean questCape, boolean fireCape, boolean infernalCape, boolean quiver, boolean diaryCape,
+		boolean maxCape, boolean bankLoaded, int combatAchievementPoints, boolean easy, boolean medium, boolean hard,
+		boolean elite, boolean master, boolean grandmaster)
+	{
+		java.util.List<String> result = new ArrayList<>();
+		if (rank == null) return result;
+		switch (rank.toLowerCase(java.util.Locale.ROOT))
+		{
+			case "soldado":
+				result.add("! Promoção automática após 30 dias no clã");
+				break;
+			case "cabo":
+				result.add(pointsRequirement("Quest points", questPoints, 200, "abra o Character Summary"));
+				result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
+				break;
+			case "aluno":
+				result.add(pointsRequirement("Quest points", questPoints, 250, "abra o Character Summary"));
+				result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Easy", combatAchievementPoints, 41, easy));
+				break;
+			case "sargento":
+				result.add(pointsRequirement("Quest points", questPoints, 300, "abra o Character Summary"));
+				result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Medium", combatAchievementPoints, 161, medium));
+				break;
+			case "cadete":
+				result.add(itemRequirement("Quest cape", questCape, bankLoaded));
+				result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Hard", combatAchievementPoints, 419, hard));
+				break;
+			case "tenente":
+				result.add(itemRequirement("Quest cape", questCape, bankLoaded));
+				result.add(itemRequirement("Dizana's quiver ou Infernal cape", quiver || infernalCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Elite", combatAchievementPoints, 1075, elite));
+				break;
+			case "capitão":
+				result.add(itemRequirement("Diary cape", diaryCape, bankLoaded));
+				result.add(itemRequirement("Dizana's quiver", quiver, bankLoaded));
+				result.add(itemRequirement("Infernal cape", infernalCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Master", combatAchievementPoints, 1945, master));
+				break;
+			case "major":
+				result.add(itemRequirement("Diary cape", diaryCape, bankLoaded));
+				result.add(itemRequirement("Dizana's quiver", quiver, bankLoaded));
+				result.add(itemRequirement("Infernal cape", infernalCape, bankLoaded));
+				result.add(pointsRequirement("Total level", totalLevel, 2300, "entre no jogo"));
+				result.add(caRequirement("Combat Achievements Master", combatAchievementPoints, 1945, master));
+				break;
+			case "coronel":
+				result.add(itemRequirement("Diary cape", diaryCape, bankLoaded));
+				result.add(itemRequirement("Max cape ou 2376 total", maxCape, bankLoaded));
+				result.add(caRequirement("Combat Achievements Grandmaster", combatAchievementPoints, 2671, grandmaster));
+				break;
+			default:
+				break;
+		}
+		return result;
+	}
+
+	private static String pointsRequirement(String label, int value, int required, String unknownInstruction)
+	{
+		if (value < 0) return "! " + label + ": não verificado — " + unknownInstruction;
+		return (value >= required ? "✓ " : "✕ ") + label + ": " + value + "/" + required;
+	}
+
+	private static String itemRequirement(String label, boolean detected, boolean bankLoaded)
+	{
+		if (detected) return "✓ " + label + " detectado";
+		return bankLoaded ? "✕ " + label + " não encontrado — coloque no inventário ou equipe se possuir"
+			: "! " + label + " ainda não verificado — abra o banco";
+	}
+
+	private static String caRequirement(String label, int points, int required, boolean completed)
+	{
+		if (completed) return "✓ " + label + (points >= 0 ? ": " + points + "/" + required : " detectado");
+		if (points < 0) return "! " + label + ": abra o menu Combat Achievements";
+		return "✕ " + label + ": " + points + "/" + required;
 	}
 
 	private int readCombatAchievementPoints()
 	{
+		// CA_POINTS is server-backed and available without opening the Combat
+		// Achievements interface. Prefer it over parsing transient widgets.
+		int automaticPoints = Math.max(
+			client.getVarbitValue(VarbitID.CA_POINTS),
+			client.getServerVarbitValue(VarbitID.CA_POINTS));
+		if (automaticPoints >= 0) return automaticPoints;
 		Widget caRewards = client.getWidget(InterfaceID.CA_REWARDS);
 		int points = parseCombatAchievementPoints(caRewards);
 		if (points >= 0) return points;
@@ -762,6 +1089,53 @@ public class ClanMessagesPlugin extends Plugin
 
 	private int readQuestPoints()
 	{
+		// Quest ids map to rows in the game's Quest DB table. Sum each finished
+		// quest's point reward so no interface needs to be opened and new quests
+		// automatically contribute to both the earned and maximum totals.
+		int earnedPoints = 0;
+		int maximumPoints = 0;
+		int readableRows = 0;
+		for (Quest quest : Quest.values())
+		{
+			Object[] values;
+			try
+			{
+				values = client.getDBTableField(
+					quest.getId(), DBTableID.Quest.COL_QUESTPOINTS, 0);
+			}
+			catch (IllegalArgumentException exception)
+			{
+				log.debug("Quest DB row {} is not readable", quest.getId());
+				continue;
+			}
+			int reward = firstInteger(values, -1);
+			if (reward < 0) continue;
+			readableRows++;
+			maximumPoints += reward;
+			boolean finished = false;
+			if (reward > 0)
+			{
+				try
+				{
+					finished = quest.getState(client) == QuestState.FINISHED;
+				}
+				catch (RuntimeException exception)
+				{
+					log.debug("Unable to read quest state for {}", quest.getName());
+				}
+			}
+			if (finished)
+			{
+				earnedPoints += reward;
+			}
+		}
+		if (readableRows > 0)
+		{
+			lastMaximumQuestPoints = maximumPoints;
+			log.debug("Ranks automatic quest points: {}/{} from {} quest rows",
+				earnedPoints, maximumPoints, readableRows);
+			return earnedPoints;
+		}
 		Widget questListPoints = client.getWidget(InterfaceID.Questlist.QUESTPOINTS);
 		int points = parseQuestPoints(questListPoints, true);
 		if (points >= 0) return points;
@@ -770,6 +1144,16 @@ public class ClanMessagesPlugin extends Plugin
 		if (points >= 0) return points;
 		Widget summary = client.getWidget(InterfaceID.ACCOUNT_SUMMARY_SIDEPANEL);
 		return parseQuestPoints(summary, false);
+	}
+
+	private static int firstInteger(Object[] values, int fallback)
+	{
+		if (values == null) return fallback;
+		for (Object value : values)
+		{
+			if (value instanceof Number) return ((Number) value).intValue();
+		}
+		return fallback;
 	}
 
 	private int parseQuestPoints(Widget root, boolean allowNumberOnly)
@@ -813,24 +1197,6 @@ public class ClanMessagesPlugin extends Plugin
 		return -1;
 	}
 
-	private static String questSummary(int questPoints, boolean questCape)
-	{
-		String status = questPoints >= 0 ? "✓ " + questPoints + " Quest points" : questCape ? "✓ Quest cape detectada" : "— leitura pendente";
-		return "Quest points: " + status + " | Abra Quests e clique em Sync";
-	}
-
-	private static String combatAchievementSummary(int points, boolean tzTokHelm, boolean vampyricHelm, boolean zukHelm)
-	{
-		String tier = points < 0 ? "— leitura pendente" : "✓ " + points + " pontos";
-		if (points >= 2671 || zukHelm) tier += " — Grandmaster";
-		else if (points >= 1945 || vampyricHelm) tier += " — Master";
-		else if (points >= 1075 || tzTokHelm) tier += " — Elite";
-		else if (points >= 419) tier += " — Hard";
-		else if (points >= 161) tier += " — Medium";
-		else if (points >= 41) tier += " — Easy";
-		return "Combat achievements: " + tier + " | Abra Combat Achievements e clique em Sync";
-	}
-
 	private static String achievementStatus(int points, int required)
 	{
 		if (points < 0) return "— abra a aba Combat Achievements e sincronize";
@@ -844,18 +1210,14 @@ public class ClanMessagesPlugin extends Plugin
 		return "— " + points + "/" + required + " pontos ou equipe o " + helmetName;
 	}
 
-	private static String currentClanRank(ClanChannel channel, String playerName)
+	private void ensureRankBankAccount(String accountName)
 	{
-		if (channel == null) return "Clan channel não carregado";
-		ClanChannelMember member = channel.findMember(playerName);
-		if (member == null || member.getRank() == null) return "Membro não encontrado no clan channel";
-		ClanRank rank = member.getRank();
-		if (rank.equals(ClanRank.JMOD)) return "J-Mod";
-		if (rank.equals(ClanRank.OWNER)) return "Owner";
-		if (rank.equals(ClanRank.DEPUTY_OWNER)) return "Deputy owner";
-		if (rank.equals(ClanRank.ADMINISTRATOR)) return "Administrator";
-		if (rank.equals(ClanRank.GUEST)) return "Guest";
-		return "Rank " + rank.getRank();
+		String safeAccount = accountName == null ? "" : accountName;
+		if (safeAccount.equals(rankBankAccount)) return;
+		rankBankAccount = safeAccount;
+		rankBankItems.clear();
+		rankBankItemIds.clear();
+		rankBankLoaded = false;
 	}
 
 	private void collectItemNames(ItemContainer container, java.util.Set<String> names)
@@ -881,6 +1243,20 @@ public class ClanMessagesPlugin extends Plugin
 	private static boolean containsAnyItem(java.util.Set<String> items, String... names)
 	{
 		for (String name : names) if (containsItem(items, name)) return true;
+		return false;
+	}
+
+	private static boolean containsItemVariant(java.util.Set<String> items, String baseName)
+	{
+		String normalizedBase = baseName.toLowerCase(java.util.Locale.ROOT);
+		for (String item : items)
+		{
+			String normalizedItem = item.toLowerCase(java.util.Locale.ROOT);
+			if (normalizedItem.equals(normalizedBase) || normalizedItem.startsWith(normalizedBase + " ("))
+			{
+				return true;
+			}
+		}
 		return false;
 	}
 
@@ -993,16 +1369,24 @@ public class ClanMessagesPlugin extends Plugin
 		return "Quest points pendentes";
 	}
 
-	private void submitDropStats(Collection<ItemStack> items, String source, long totalValue)
+	private void submitDropStats(Collection<ItemStack> items, String source)
 	{
 		if (client.getLocalPlayer() == null) return;
-		List<String> names = new ArrayList<>();
-		for (ItemStack item : items) names.add(item.getQuantity() + "x " + itemManager.getItemComposition(item.getId()).getName());
+		List<Map<String, Object>> validDrops = new ArrayList<>();
+		for (ItemStack item : items)
+		{
+			long value = (long) itemManager.getItemPrice(item.getId()) * item.getQuantity();
+			if (value < 1_000_000L) continue;
+			Map<String, Object> validDrop = new LinkedHashMap<>();
+			validDrop.put("item", item.getQuantity() + "x " + itemManager.getItemComposition(item.getId()).getName());
+			validDrop.put("value", value);
+			validDrops.add(validDrop);
+		}
+		if (validDrops.isEmpty()) return;
 		// Prepare payload; include playerName so server can verify via WOM
 		java.util.Map<String, Object> dropPayload = new java.util.LinkedHashMap<>();
 		dropPayload.put("playerName", client.getLocalPlayer().getName());
-		dropPayload.put("item", String.join(", ", names));
-		dropPayload.put("value", totalValue);
+		dropPayload.put("drops", validDrops);
 		dropPayload.put("source", source);
 		postJson("stats/drops", gson.toJson(dropPayload), new okhttp3.Callback()
 		{
@@ -1028,8 +1412,14 @@ public class ClanMessagesPlugin extends Plugin
 		});
 	}
 
-	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, java.awt.Image screenshot)
+	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
+		String category, Integer npcId, List<Map<String, Object>> items, java.awt.Image screenshot)
 	{
+		if (screenshot == null)
+		{
+			log.debug("Discord drop notification skipped because the screenshot was unavailable");
+			return;
+		}
 		Map<String, Object> embed = new LinkedHashMap<>();
 		embed.put("description", description);
 		embed.put("color", 7895160);
@@ -1038,9 +1428,28 @@ public class ClanMessagesPlugin extends Plugin
 		thumbnail.put("url", "https://static.runelite.net/cache/item/icon/" + thumbnailItemId + ".png");
 		embed.put("thumbnail", thumbnail);
 		Map<String, Object> payload = new LinkedHashMap<>();
+		// Keep content empty because the existing rich embed already contains the
+		// human-readable message; consumers should use extra for processing.
 		payload.put("content", "");
 		payload.put("tts", false);
 		payload.put("embeds", java.util.Collections.singletonList(embed));
+		// Dink-compatible metadata. Custom webhook consumers should parse these
+		// structured fields instead of trying to recover item data from the embed.
+		payload.put("type", "LOOT");
+		payload.put("playerName", playerName);
+		payload.put("accountType", String.valueOf(client.getAccountType()));
+		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
+		payload.put("dinkAccountHash", liveOnAccountHash(playerName));
+		payload.put("world", client.getWorld());
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("items", items);
+		extra.put("source", source);
+		extra.put("party", java.util.Collections.singletonList(playerName));
+		extra.put("category", category);
+		extra.put("killCount", null);
+		extra.put("rarestProbability", null);
+		extra.put("npcId", npcId);
+		payload.put("extra", extra);
 		try
 		{
 			byte[] screenshotBytes = null;
@@ -1059,7 +1468,7 @@ public class ClanMessagesPlugin extends Plugin
 				.addFormDataPart("payload_json", gson.toJson(payload));
 			if (screenshotBytes != null)
 			{
-				multipart.addFormDataPart("files[0]", "loot.png",
+				multipart.addFormDataPart("file", "loot.png",
 					RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
 			}
 			Request request = discordNotificationRequest(multipart.build());
@@ -1082,8 +1491,38 @@ public class ClanMessagesPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Dink consumers expect a stable, opaque per-account identifier. Keep a
+	 * locally generated value instead of deriving it from the RSN, so renames do
+	 * not expose or silently change the identifier.
+	 */
+	private String liveOnAccountHash(String playerName)
+	{
+		String key = "notificationAccountHash." + accountCacheKey(playerName);
+		String stored = configManager.getConfiguration("live-on-clan-messages", key);
+		if (stored != null && !stored.trim().isEmpty())
+		{
+			return stored.trim();
+		}
+		byte[] randomBytes = new byte[32];
+		new java.security.SecureRandom().nextBytes(randomBytes);
+		StringBuilder generated = new StringBuilder(64);
+		for (byte value : randomBytes)
+		{
+			generated.append(String.format(java.util.Locale.ROOT, "%02x", value & 0xff));
+		}
+		String result = generated.toString();
+		configManager.setConfiguration("live-on-clan-messages", key, result);
+		return result;
+	}
+
 	private void sendPetNotification(String playerName, java.awt.Image screenshot)
 	{
+		if (screenshot == null)
+		{
+			log.debug("Discord pet notification skipped because the screenshot was unavailable");
+			return;
+		}
 		Map<String, Object> embed = new LinkedHashMap<>();
 		embed.put("title", "Pet Drop");
 		embed.put("description", "A pet was obtained.");
@@ -1148,13 +1587,6 @@ public class ClanMessagesPlugin extends Plugin
 		return author;
 	}
 
-	private static String formatGp(long value)
-	{
-		if (value >= 1_000_000) return String.format(java.util.Locale.ROOT, "%.1fM", value / 1_000_000d);
-		if (value >= 1_000) return String.format(java.util.Locale.ROOT, "%.1fk", value / 1_000d);
-		return Long.toString(value);
-	}
-
 	private static final class SilentCallback implements okhttp3.Callback
 	{
 		@Override public void onFailure(okhttp3.Call call, IOException e) { log.debug("Unable to submit statistics", e); }
@@ -1164,6 +1596,10 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		if (clanLiveBadgeDecorator != null)
+		{
+			clanLiveBadgeDecorator.refresh();
+		}
 		if (config.enabled() && client.getLocalPlayer() != null)
 		{
 			String currentAccount = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
@@ -1259,6 +1695,10 @@ public class ClanMessagesPlugin extends Plugin
 								if (!messageCursorAccount.isEmpty())
 								{
 									messageCursorByAccount.put(messageCursorAccount, lastMessageId);
+									configManager.setConfiguration(
+										"live-on-clan-messages",
+										messageCursorConfigKey(messageCursorAccount),
+										lastMessageId);
 								}
 							}
 							if (message.getId() != null && isPinnedValue(message.getPinned()))
@@ -1597,25 +2037,44 @@ public class ClanMessagesPlugin extends Plugin
 		});
 	}
 
-	private int registerGreenLiveIcon()
+	boolean isLiveStatusVisible()
 	{
-		BufferedImage image = new BufferedImage(11, 11, BufferedImage.TYPE_INT_ARGB);
-		Graphics2D graphics = image.createGraphics();
-		try
-		{
-			graphics.setColor(new Color(20, 90, 35));
-			graphics.fillOval(0, 0, 11, 11);
-			graphics.setColor(new Color(45, 220, 85));
-			graphics.fillOval(2, 2, 7, 7);
-		}
-		finally
-		{
-			graphics.dispose();
-		}
-		return chatIconManager.registerChatIcon(image);
+		return (config.liveStatusEnabled() && !onlineLiveChannels.isEmpty()) || !mvpMembers.isEmpty();
 	}
 
-	private static String normalizeChatPlayerName(String playerName)
+	boolean isPlayerLive(String playerName)
+	{
+		return config.liveStatusEnabled()
+			&& onlineLiveChannels.containsKey(normalizeChatPlayerName(playerName));
+	}
+
+	boolean isPlayerMvp(String playerName)
+	{
+		return mvpMembers.contains(normalizeChatPlayerName(playerName));
+	}
+
+	String decoratedPlayerNameIn(String displayedText)
+	{
+		String normalized = normalizeChatPlayerName(displayedText);
+		if (mvpMembers.contains(normalized)) return displayedText;
+		for (Map.Entry<String, LiveChannel> entry : onlineLiveChannels.entrySet())
+		{
+			String key = entry.getKey();
+			if (normalized.equals(key) || normalized.startsWith(key + " "))
+			{
+				LiveChannel channel = entry.getValue();
+				return channel.playerName == null ? displayedText : channel.playerName;
+			}
+		}
+		return null;
+	}
+
+	java.util.Set<String> livePlayerNamesForDiagnostics()
+	{
+		return new java.util.LinkedHashSet<>(onlineLiveChannels.keySet());
+	}
+
+	static String normalizeChatPlayerName(String playerName)
 	{
 		return WomMembership.normalizePlayerName(playerName).toLowerCase(java.util.Locale.ROOT);
 	}
@@ -1659,6 +2118,10 @@ public class ClanMessagesPlugin extends Plugin
 		if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			deliveredPinnedMessageIds.clear();
+			rankBankItems.clear();
+			rankBankItemIds.clear();
+			rankBankAccount = "";
+			rankBankLoaded = false;
 		}
 	}
 
@@ -1771,134 +2234,6 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		}
 		builder.append(color, text);
 	}
-
-	private void appendMessagePrefixIcon(ChatMessageBuilder builder, String message)
-{
-// If the message is a structured rank message, use the rank mentioned as the prefix icon when possible.
-String rankFromMessage = null;
-if (message != null)
-{		Matcher rankRequest = RANK_REQUEST_MESSAGE_PATTERN.matcher(message);
-if (rankRequest.matches()) rankFromMessage = rankRequest.group("rank");
-else
-{			Matcher promotion = PROMOTION_MESSAGE_PATTERN.matcher(message);			if (promotion.matches()) rankFromMessage = promotion.group("rank");		}
-}
-
-// Prefer panel rank chat icon if available
-		// If a rank was mentioned in the message, prefer the panel resource icon first (ensures identical image),
-		// then fall back to clan title icons if no resource is available.
-		if (rankFromMessage != null && !rankFromMessage.trim().isEmpty())
-		{
-			// Try resource-based icon (same one shown in the Solicitações panel)
-			Integer regId = RankVisuals.registerChatIconForRank(chatIconManager, rankFromMessage);
-			if (regId != null && regId >= 0)
-			{
-				log.debug("appendMessagePrefixIcon: using registered resource icon for rank '{}' -> iconId={}", rankFromMessage, regId);
-				builder.img(regId).append(" ");
-				appendChatText(builder, null, rankFromMessage);
-				return;
-			}
-			// If no resource, try clan titles (aliases allowed)
-			String rankKey = rankFromMessage.trim().toLowerCase(java.util.Locale.ROOT);
-			net.runelite.api.clan.ClanSettings cs = client.getClanSettings();
-			if (cs != null)
-			{
-				for (int r = -1; r <= 127; r++)
-				{
-					ClanTitle t = cs.titleForRank(new ClanRank(r));
-					if (t == null || t.getName() == null) continue;
-					String titleName = t.getName().trim().toLowerCase(java.util.Locale.ROOT);
-					if (titleName.equals(rankKey) || (RANK_TITLE_ALIASES.containsKey(rankKey) && titleName.equals(RANK_TITLE_ALIASES.get(rankKey).toLowerCase(java.util.Locale.ROOT))))
-					{
-						int iconNumber = chatIconManager.getIconNumber(t);
-						int iconIndex = chatIconManager.chatIconIndex(iconNumber);
-						log.debug("appendMessagePrefixIcon: matched clan title '{}' for rank '{}' -> iconIndex={}", t.getName(), rankFromMessage, iconIndex);
-						if (iconIndex >= 0)
-						{
-							builder.img(iconIndex).append(" ");
-							return;
-						}
-					}
-				}
-			}
-		}
-		
-if (panel != null)
-{
-String currentRank = panel.getCurrentRank();
-// If the message mentioned a rank, prefer using that icon for the prefix.
-if (rankFromMessage != null && !rankFromMessage.trim().isEmpty())
-{			Integer msgRankIconId = RankVisuals.chatIconIndexFor(chatIconManager, rankFromMessage);
-log.debug("appendMessagePrefixIcon: rankFromMessage='{}' -> chatIconIdMap match={}", rankFromMessage, msgRankIconId);
-			// If no registered chat icon, try to find a clan title with the same name and use its chat icon
-			net.runelite.api.clan.ClanSettings settingsLocal = client.getClanSettings();
-			if (settingsLocal != null)
-			{
-				// Titles will be checked later via members; keep settingsLocal non-null for that path.
-			}
-			// Fallback: try to register resource icon used by panel dynamically
-			
-		}
-		if (currentRank != null && !currentRank.trim().isEmpty())
-{
-Integer rankIconId = RankVisuals.chatIconIndexFor(chatIconManager, currentRank);
-log.debug("appendMessagePrefixIcon: currentRank='{}' -> chatIconIdMap match={}", currentRank, rankIconId);
-log.debug("Registered rank icons: {}", RankVisuals.chatIconIds());
-if (rankIconId != null && rankIconId >= 0)
-{				builder.img(rankIconId).append(" ");				return;			}		}
-}
-
-// Fallback: use clan title icon (try to use the player's clan title)
-// If a rank was mentioned in the message, try to register its resource icon now (ensures the same icon as the panel).
-if (rankFromMessage != null && !rankFromMessage.trim().isEmpty())
-{
-	javax.swing.Icon resourceIcon = RankVisuals.rankIconFor(rankFromMessage);
-	if (resourceIcon instanceof javax.swing.ImageIcon)
-	{
-		try
-		{
-			java.awt.Image img = ((javax.swing.ImageIcon) resourceIcon).getImage();
-			int w = img.getWidth(null);
-			int h = img.getHeight(null);
-			if (w > 0 && h > 0)
-			{
-				java.awt.image.BufferedImage buffered = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-				java.awt.Graphics2D g = buffered.createGraphics();
-				g.drawImage(img, 0, 0, null);
-				g.dispose();
-				int regId = chatIconManager.registerChatIcon(buffered);
-				if (regId >= 0)
-				{
-					builder.img(regId).append(" ");
-					return;
-				}
-			}
-		}
-		catch (RuntimeException | Error ex)
-		{
-			log.debug("Failed to register resource icon for rank {}", rankFromMessage, ex);
-		}
-	}
-}
-net.runelite.api.clan.ClanSettings settings = client.getClanSettings();
-ClanTitle title = null;
-if (settings != null && client.getLocalPlayer() != null)
-{			net.runelite.api.clan.ClanMember member = settings.findMember(client.getLocalPlayer().getName());
-if (member != null && member.getRank() != null)
-{				title = settings.titleForRank(member.getRank());
-}
-}
-// Last-resort fallback: a default clan title (previous behavior)
-if (title == null)
-{			title = settings == null ? null : settings.titleForRank(ClanRank.DEPUTY_OWNER);
-}
-if (title == null)
-{			return;		}
-int iconNumber = chatIconManager.getIconNumber(title);
-		int iconIndex = chatIconManager.chatIconIndex(iconNumber);
-if (iconIndex >= 0)
-{			builder.img(iconIndex).append(" ");
-}
-}
 
 	private void publishDraft(String mode)
 	{
@@ -2190,17 +2525,70 @@ if (iconIndex >= 0)
 					{
 						if (response.isSuccessful())
 						{
-							panel.setStatusSuccess("Solicita\u00E7\u00E3o de rank enviada a staff!");
+							panel.setRankRequestState(true, 0);
+							panel.setStatusSuccess("Solicita\u00E7\u00E3o enviada para a staff.");
 							// Rank requests are staff-only. Do not simulate the STAFF
 							// message for the requesting member.
 							scheduleMessageRefresh();
 							if (isStaff) fetchRankRequests();
+						}
+						else if (response.code() == 409)
+						{
+							panel.setRankRequestState(true, 0);
+							panel.setStatus("Você já possui uma solicitação pendente");
+						}
+						else if (response.code() == 429)
+						{
+							int retryAfter = rankRetryAfter(responseBody, response.header("Retry-After"));
+							panel.setRankRequestState(false, retryAfter);
+							panel.setStatus("Aguarde " + Math.max(1, (retryAfter + 59) / 60) + " min para solicitar novamente");
 						}
 						else panel.setStatus("Erro " + response.code());
 					}
 				}
 			}
 		});
+	}
+
+	private void fetchRankRequestStatus()
+	{
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty() || panel == null) return;
+		HttpUrl base = serverBaseUrl();
+		if (base == null) return;
+		Request request = requestBuilder(base.newBuilder().addPathSegments("rank-request/status").build()).get().build();
+		okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch rank request status", exception);
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful() || response.body() == null) return;
+					com.google.gson.JsonObject state = gson.fromJson(response.body().string(), com.google.gson.JsonObject.class);
+					boolean pending = state != null && state.has("pending") && state.get("pending").getAsBoolean();
+					int cooldown = state != null && state.has("cooldownRemaining")
+						? Math.max(0, state.get("cooldownRemaining").getAsInt()) : 0;
+					panel.setRankRequestState(pending, cooldown);
+				}
+			}
+		});
+	}
+
+	private int rankRetryAfter(String responseBody, String retryHeader)
+	{
+		try
+		{
+			com.google.gson.JsonObject payload = gson.fromJson(responseBody, com.google.gson.JsonObject.class);
+			if (payload != null && payload.has("retryAfter"))
+				return Math.max(1, payload.get("retryAfter").getAsInt());
+		}
+		catch (RuntimeException ignored) { }
+		try { return Math.max(1, Integer.parseInt(retryHeader)); }
+		catch (RuntimeException ignored) { return 60; }
 	}
 
 	private void verifyToken()
@@ -2254,6 +2642,7 @@ if (iconIndex >= 0)
 					switchMessageCursorAccount(rsn);
 					authenticatedPlayerName = rsn;
 					configurePolling();
+					fetchRankRequestStatus();
 					if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); }
 					if (panel != null) panel.setStatus(staff ? "Acesso staff confirmado (WOM)" : "Acesso liberado (membro WOM)");
 					if (staff)
@@ -2355,6 +2744,7 @@ if (iconIndex >= 0)
 								switchMessageCursorAccount(rsn);
 								authenticatedPlayerName = rsn;
 								configurePolling();
+								fetchRankRequestStatus();
 								if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); }
 								if (panel != null) panel.setStatus(staff ? "Acesso staff confirmado (WOM)" : "Acesso liberado (membro WOM)");
 								if (staff)
@@ -2445,9 +2835,18 @@ if (iconIndex >= 0)
 		if (!messageCursorAccount.isEmpty())
 		{
 			messageCursorByAccount.put(messageCursorAccount, lastMessageId);
+			configManager.setConfiguration(
+				"live-on-clan-messages",
+				messageCursorConfigKey(messageCursorAccount),
+				lastMessageId);
 		}
 		messageCursorAccount = accountKey;
-		lastMessageId = messageCursorByAccount.getOrDefault(accountKey, "");
+		String storedCursor = configManager.getConfiguration(
+			"live-on-clan-messages",
+			messageCursorConfigKey(accountKey));
+		lastMessageId = messageCursorByAccount.getOrDefault(
+			accountKey,
+			storedCursor == null ? "" : storedCursor);
 		lastClearMarker = "";
 		displayedPendingRankRequests.clear();
 		if (panel != null)
@@ -2490,6 +2889,11 @@ if (iconIndex >= 0)
 	private static String accountCacheKey(String accountName)
 	{
 		return accountName.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "_");
+	}
+
+	private static String messageCursorConfigKey(String accountName)
+	{
+		return "messageCursor.v1." + accountCacheKey(accountName);
 	}
 
 	private void fetchRankRequests()

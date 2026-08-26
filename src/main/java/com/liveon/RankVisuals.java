@@ -216,14 +216,6 @@ final class RankVisuals
 	}
 
 	/**
-	 * Returns a copy of the registered chat icon id mapping useful for debugging.
-	 */
-	static Map<String, Integer> chatIconIds()
-	{
-		return new LinkedHashMap<>(CHAT_ICON_IDS);
-	}
-
-	/**
 	 * Ensure a chat icon is registered for the given rank resource and return its id.
 	 * Returns null if no resource exists or registration failed.
 	 */

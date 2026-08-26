@@ -72,17 +72,6 @@ public interface ClanMessagesConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "discordDropScreenshot",
-		name = "Incluir captura",
-		description = "Inclui uma imagem do jogo na notificacao do drop",
-		position = 5
-	)
-	default boolean discordDropScreenshot()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "discordDropMinimumValue",
 		name = "Valor minimo do drop",
 		description = "Valor GE minimo para publicar um drop",
