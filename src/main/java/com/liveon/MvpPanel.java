@@ -16,6 +16,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.time.YearMonth;
 import java.time.format.TextStyle;
+import java.awt.image.BufferedImage;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +24,8 @@ import java.util.Locale;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.Icon;
+import javax.swing.ImageIcon;
 import javax.swing.JLabel;
 import javax.swing.JButton;
 import javax.swing.JPanel;
@@ -32,6 +35,8 @@ import javax.swing.Scrollable;
 import javax.swing.JTabbedPane;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import net.runelite.client.plugins.hiscore.HiscorePlugin;
+import net.runelite.client.util.ImageUtil;
 
 final class MvpPanel extends JPanel
 {
@@ -41,6 +46,9 @@ final class MvpPanel extends JPanel
 	private static final Color DROP_GROUP_DARK = new Color(35, 35, 35);
 	private static final Color DROP_GROUP_LIGHT = new Color(44, 44, 44);
 	private static final Color PANEL_BACKGROUND = new Color(36, 36, 36);
+	private static final Icon IRONMAN_ICON = officialIronIcon("ironman.png");
+	private static final Icon HARDCORE_IRONMAN_ICON = officialIronIcon("hardcore_ironman.png");
+	private static final Icon ULTIMATE_IRONMAN_ICON = officialIronIcon("ultimate_ironman.png");
 	private final JPanel dropEntries = new WidthTrackingPanel();
 	private final JPanel ehbEntries = new WidthTrackingPanel();
 	private final JPanel ehpEntries = new WidthTrackingPanel();
@@ -350,6 +358,7 @@ final class MvpPanel extends JPanel
 		crown.setPreferredSize(new Dimension(25, 30));
 		row.add(crown, BorderLayout.WEST);
 		JLabel name = new JLabel(entry.getPlayerName());
+		applyAccountIcon(name, entry.getAccountType());
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
 		JLabel caption = new JLabel("Líder do mês");
 		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 14f));
@@ -432,6 +441,7 @@ final class MvpPanel extends JPanel
 		place.setPreferredSize(new Dimension(28, 20));
 		JLabel name = new JLabel(shortName(entry.getPlayerName(), 15));
 		name.setToolTipText(entry.getPlayerName());
+		applyAccountIcon(name, entry.getAccountType());
 		name.setForeground(new Color(225, 225, 225));
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 15f));
 		JLabel value = new JLabel(formatHours(entry.getGained()), SwingConstants.RIGHT);
@@ -459,6 +469,7 @@ final class MvpPanel extends JPanel
 		place.setPreferredSize(new Dimension(22, 20));
 		JLabel name = new JLabel(entry.getPlayerName());
 		name.setToolTipText(entry.getPlayerName());
+		applyAccountIcon(name, entry.getAccountType());
 		name.setForeground(new Color(225, 225, 225));
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 15f));
 		JLabel value = new JLabel(formatHours(entry.getGained()));
@@ -546,13 +557,14 @@ final class MvpPanel extends JPanel
 			BorderFactory.createMatteBorder(0, 3, 0, 0, GOLD),
 			BorderFactory.createEmptyBorder(10, 9, 9, 9)));
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 158));
+		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 173));
 		JLabel crown = new JLabel("♛", SwingConstants.CENTER);
 		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 20f));
 		crown.setForeground(GOLD);
 		crown.setPreferredSize(new Dimension(25, 30));
 		card.add(crown, BorderLayout.WEST);
 		JLabel name = new JLabel(entry.getPlayerName());
+		applyAccountIcon(name, entry.getAccountType());
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
 		JLabel caption = new JLabel("Líder do mês");
 		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 14f));
@@ -588,7 +600,7 @@ final class MvpPanel extends JPanel
 		card.setBackground(background);
 		card.setBorder(BorderFactory.createMatteBorder(0, 3, 0, 0, accent));
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 141 : 61));
+		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 156 : 61));
 		JPanel summary = new JPanel(new BorderLayout(7, 0));
 		summary.setBackground(background);
 		summary.setBorder(BorderFactory.createEmptyBorder(7, 8, 7, 8));
@@ -628,7 +640,7 @@ final class MvpPanel extends JPanel
 		wrapper.setBackground(groupBackground);
 		wrapper.setBorder(BorderFactory.createMatteBorder(0, 2, 0, 0, new Color(82, 82, 82)));
 		wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
-		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 136 : 56));
+		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 151 : 56));
 		JPanel row = new JPanel(new BorderLayout(7, 0));
 		row.setBackground(groupBackground);
 		row.setBorder(BorderFactory.createEmptyBorder(9, 5, 9, 7));
@@ -670,6 +682,7 @@ final class MvpPanel extends JPanel
 	{
 		boolean expanded = normalizePlayer(entry.getPlayerName()).equals(expandedDropPlayer);
 		JLabel name = new JLabel(shortName(entry.getPlayerName(), length) + (expanded ? "  ▾" : "  ›"));
+		applyAccountIcon(name, entry.getAccountType());
 		name.setToolTipText(entry.getPlayerName());
 		name.setFont(name.getFont().deriveFont(Font.BOLD, size));
 		name.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
@@ -713,7 +726,7 @@ final class MvpPanel extends JPanel
 		panel.setBackground(background);
 		panel.setBorder(BorderFactory.createEmptyBorder(7, leftPadding, 8, 5));
 		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 95));
 		panel.add(leftPinnedDropDetails(entry), BorderLayout.WEST);
 		return panel;
 	}
@@ -723,50 +736,98 @@ final class MvpPanel extends JPanel
 		JPanel holder = new JPanel(new BorderLayout());
 		holder.setOpaque(false);
 		holder.setAlignmentX(Component.LEFT_ALIGNMENT);
-		holder.setMaximumSize(new Dimension(Integer.MAX_VALUE, 65));
+		holder.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
 		holder.add(createDropDetails(entry), BorderLayout.WEST);
 		return holder;
 	}
 
 	private static JPanel createDropDetails(MvpDropEntry entry)
 	{
-		JPanel details = new JPanel(new GridLayout(0, 1, 0, 3));
+		JPanel details = new JPanel(new GridLayout(0, 1, 0, 4));
 		details.setOpaque(false);
 		details.setAlignmentX(Component.LEFT_ALIGNMENT);
-		details.setMaximumSize(new Dimension(Integer.MAX_VALUE, 65));
+		details.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
 		MvpDropDetail[] drops = entry.getTopDrops();
 		if (drops == null || drops.length == 0)
 		{
 			JLabel unavailable = new JLabel("Top 3 ainda sem registros");
 			unavailable.setForeground(new Color(175, 175, 175));
-			unavailable.setFont(unavailable.getFont().deriveFont(Font.BOLD, 13f));
+			unavailable.setFont(unavailable.getFont().deriveFont(Font.BOLD, 14f));
 			unavailable.setHorizontalAlignment(SwingConstants.LEFT);
 			details.add(unavailable);
-			details.setPreferredSize(new Dimension(165, 20));
+			details.setPreferredSize(new Dimension(175, 22));
 			return details;
 		}
 		int displayed = 0;
 		for (MvpDropDetail drop : drops)
 		{
 			if (drop.getValue() < 1_000_000L || displayed >= 3) continue;
-			String dropLine = drop.getItem() + "  " + formatValue(drop.getValue());
+			String readableItem = drop.getItem().replaceFirst("^(\\d+)x\\s*", "$1x ");
+			String dropLine = readableItem + "  •  " + formatValue(drop.getValue());
 			JLabel item = new JLabel(dropLine);
 			item.setToolTipText(drop.getItem() + (drop.getSource() == null || drop.getSource().isEmpty()
 				? "" : " • " + drop.getSource()));
-			item.setForeground(new Color(210, 190, 125));
-			float dropFontSize = dropLine.length() > 31 ? 11f : dropLine.length() > 25 ? 12f : 13f;
-			item.setFont(item.getFont().deriveFont(dropFontSize));
+			item.setForeground(new Color(230, 210, 145));
+			item.setFont(item.getFont().deriveFont(Font.BOLD, 15f));
 			item.setHorizontalAlignment(SwingConstants.LEFT);
 			details.add(item);
 			displayed++;
 		}
-		details.setPreferredSize(new Dimension(165, Math.max(20, displayed * 21)));
+		details.setPreferredSize(new Dimension(175, Math.max(24, displayed * 24)));
 		return details;
 	}
 
 	private static String normalizePlayer(String value)
 	{
 		return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+	}
+
+	private static void applyAccountIcon(JLabel label, String accountType)
+	{
+		Icon icon = accountTypeIcon(accountType);
+		if (icon != null)
+		{
+			label.setIcon(icon);
+			label.setIconTextGap(4);
+			String typeLabel = accountTypeLabel(accountType);
+			String currentTooltip = label.getToolTipText();
+			label.setToolTipText(currentTooltip == null || currentTooltip.isEmpty()
+				? typeLabel : currentTooltip + " • " + typeLabel);
+		}
+	}
+
+	private static Icon accountTypeIcon(String accountType)
+	{
+		String normalized = accountType == null ? "" : accountType.trim().toLowerCase(Locale.ROOT);
+		switch (normalized)
+		{
+			case "ironman": return IRONMAN_ICON;
+			case "hardcore":
+			case "hardcore_ironman": return HARDCORE_IRONMAN_ICON;
+			case "ultimate":
+			case "ultimate_ironman": return ULTIMATE_IRONMAN_ICON;
+			default: return null;
+		}
+	}
+
+	private static Icon officialIronIcon(String resource)
+	{
+		BufferedImage image = ImageUtil.loadImageResource(HiscorePlugin.class, resource);
+		return image == null ? null : new ImageIcon(ImageUtil.resizeImage(image, 13, 13));
+	}
+
+	private static String accountTypeLabel(String accountType)
+	{
+		String normalized = accountType == null ? "" : accountType.trim().toLowerCase(Locale.ROOT);
+		switch (normalized)
+		{
+			case "ironman": return "Ironman";
+			case "hardcore":
+			case "hardcore_ironman": return "Hardcore Ironman";
+			case "ultimate":
+			case "ultimate_ironman": return "Ultimate Ironman";
+			default: return "Conta normal";
+		}
 	}
 
 	private static String formatValue(long value)

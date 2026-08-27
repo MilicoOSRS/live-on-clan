@@ -9,8 +9,9 @@ Plugin RuneLite exclusivo para membros do clan Live On.
 - Ranking mensal MVP Drops.
 - Rankings mensais de EHB e EHP com dados do Wise Old Man.
 - Lista de membros ao vivo na Twitch.
-- Icones opcionais de Live e MVP no chat do clan.
-- Notificacoes opcionais de drops raros no Discord.
+- Indicadores de Live, MVP e equipes no chat e na lista do clan.
+- Gerenciamento de MVP e equipes pela staff autorizada.
+- Notificacoes opcionais de drops raros e pets no Discord, sempre com captura.
 
 ## Acesso
 
@@ -25,9 +26,9 @@ ficam desativados ate o consentimento do usuario nas configuracoes. Ao ativa-los
 o endereco IP e o nome do personagem podem ser enviados aos respectivos servicos
 externos.
 
-O envio de drops ao Discord e opcional. Quando a opcao de captura esta ativa, a
-imagem do jogo e enviada a API do clan, que a encaminha ao servico de filtros
-configurado no servidor.
+O envio de drops ao Discord e opcional. Quando ativado, os dados do drop e a
+captura do jogo sao enviados a API do clan, que os encaminha ao servico de
+filtros configurado no servidor.
 
 ## Desenvolvimento
 

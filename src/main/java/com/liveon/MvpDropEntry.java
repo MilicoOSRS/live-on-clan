@@ -14,6 +14,8 @@ final class MvpDropEntry
 	private int dropCount;
 	@SerializedName("top_drops")
 	private MvpDropDetail[] topDrops;
+	@SerializedName("account_type")
+	private String accountType;
 
 	MvpDropEntry()
 	{

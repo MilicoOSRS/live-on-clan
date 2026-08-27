@@ -29,6 +29,7 @@ final class RanksPanel extends JPanel
 	private static final int ICON_TEXT_WIDTH = 132;
 	private static final int REQUIREMENT_TEXT_WIDTH = 158;
 	private static final int NEXT_REQUIREMENT_TEXT_WIDTH = 148;
+	private static final int REQUIREMENT_NOTICE_WIDTH = 190;
 	private static final Color ORANGE = new Color(190, 104, 0);
 	private static final String REQUEST_PENDING_TEXT = "Aguardando aprovação";
 	private static final String REQUEST_PENDING_STATUS = "Solicitação enviada para a staff.";
@@ -65,7 +66,7 @@ final class RanksPanel extends JPanel
 	{
 		setLayout(new BorderLayout(5, 5));
 		setPreferredSize(new Dimension(PANEL_WIDTH, 650));
-		setBorder(BorderFactory.createEmptyBorder(7, 6, 6, 6));
+		setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
 		verify = new JButton("Verificar");
 		verify.setToolTipText("Atualizar itens, pontos e requisitos do rank");
 		verify.setBackground(ORANGE);
@@ -79,17 +80,17 @@ final class RanksPanel extends JPanel
 		identityText.add(playerName);
 		identityText.add(actualRank);
 		JPanel identity = new JPanel(new BorderLayout(8, 0));
-		identity.setBorder(BorderFactory.createEmptyBorder(7, 7, 10, 7));
+		identity.setBorder(BorderFactory.createEmptyBorder(4, 7, 6, 7));
 		identity.add(actualRankIcon, BorderLayout.WEST);
 		identity.add(identityText, BorderLayout.CENTER);
 
 		availableTitle.setFont(availableTitle.getFont().deriveFont(Font.BOLD));
 		availableRank.setFont(availableRank.getFont().deriveFont(Font.BOLD, 14f));
 		JPanel availableHeader = new JPanel(new BorderLayout());
-		availableHeader.setBorder(BorderFactory.createEmptyBorder(4, 6, 5, 6));
+		availableHeader.setBorder(BorderFactory.createEmptyBorder(3, 6, 3, 6));
 		availableHeader.add(availableTitle, BorderLayout.CENTER);
 		JPanel availableBody = new JPanel(new BorderLayout(7, 0));
-		availableBody.setBorder(BorderFactory.createEmptyBorder(7, 8, 8, 8));
+		availableBody.setBorder(BorderFactory.createEmptyBorder(5, 8, 5, 8));
 		availableBody.add(availableRankIcon, BorderLayout.WEST);
 		availableBody.add(availableRank, BorderLayout.CENTER);
 		availableCard.setBorder(BorderFactory.createLineBorder(new Color(58, 58, 58)));
@@ -100,8 +101,8 @@ final class RanksPanel extends JPanel
 		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
 		identity.setAlignmentX(Component.LEFT_ALIGNMENT);
 		availableCard.setAlignmentX(Component.LEFT_ALIGNMENT);
-		identity.setMaximumSize(new Dimension(Integer.MAX_VALUE, 65));
-		availableCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 92));
+		identity.setMaximumSize(new Dimension(Integer.MAX_VALUE, 54));
+		availableCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 76));
 		header.add(identity);
 		header.add(Box.createVerticalStrut(3));
 		JButton reset = new JButton("Resetar");
@@ -112,13 +113,13 @@ final class RanksPanel extends JPanel
 		verifyRow.add(verify);
 		verifyRow.add(reset);
 		header.add(verifyRow);
-		header.add(Box.createVerticalStrut(6));
+		header.add(Box.createVerticalStrut(4));
 		specialTitle.setFont(specialTitle.getFont().deriveFont(Font.BOLD));
 		specialNotice.setForeground(new Color(180, 180, 180));
 		JPanel specialBody = new JPanel();
 		specialBody.setOpaque(false);
 		specialBody.setLayout(new BoxLayout(specialBody, BoxLayout.Y_AXIS));
-		specialBody.setBorder(BorderFactory.createEmptyBorder(7, 8, 8, 8));
+		specialBody.setBorder(BorderFactory.createEmptyBorder(5, 8, 6, 8));
 		specialBody.add(specialTitle);
 		specialBody.add(Box.createVerticalStrut(4));
 		specialBody.add(specialNotice);
@@ -129,7 +130,7 @@ final class RanksPanel extends JPanel
 		specialCard.setVisible(false);
 		header.add(specialCard);
 		header.add(availableCard);
-		header.add(Box.createVerticalStrut(5));
+		header.add(Box.createVerticalStrut(3));
 
 		JLabel nextTitle = new JLabel("Próximo objetivo");
 		nextTitle.setForeground(new Color(155, 155, 155));
@@ -138,7 +139,7 @@ final class RanksPanel extends JPanel
 		JPanel nextBody = new JPanel();
 		nextBody.setOpaque(false);
 		nextBody.setLayout(new BoxLayout(nextBody, BoxLayout.Y_AXIS));
-		nextBody.setBorder(BorderFactory.createEmptyBorder(5, 7, 6, 7));
+		nextBody.setBorder(BorderFactory.createEmptyBorder(4, 7, 5, 7));
 		nextBody.add(nextTitle);
 		nextBody.add(Box.createVerticalStrut(2));
 		JPanel nextValue = new JPanel(new BorderLayout(7, 0));
@@ -159,10 +160,10 @@ final class RanksPanel extends JPanel
 		header.add(nextCard);
 
 		detected.setLayout(new BoxLayout(detected, BoxLayout.Y_AXIS));
-		detected.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+		detected.setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
 		JPanel requirementsHeader = new JPanel(new BorderLayout());
 		requirementsTitle.setFont(requirementsTitle.getFont().deriveFont(Font.BOLD));
-		requirementsHeader.setBorder(BorderFactory.createEmptyBorder(5, 6, 4, 6));
+		requirementsHeader.setBorder(BorderFactory.createEmptyBorder(4, 6, 3, 6));
 		requirementsHeader.add(requirementsTitle, BorderLayout.NORTH);
 		helper.setForeground(new Color(155, 155, 155));
 		requirementsHeader.add(helper, BorderLayout.SOUTH);
@@ -488,7 +489,20 @@ final class RanksPanel extends JPanel
 		label.setAlignmentX(Component.LEFT_ALIGNMENT);
 		label.setVerticalAlignment(JLabel.TOP);
 		String normalized = normalize(text);
-		if (text.trim().startsWith("✓"))
+		if (normalized.startsWith("! abra o banco"))
+		{
+			label.setForeground(new Color(115, 195, 255));
+			label.setBackground(new Color(25, 45, 61));
+			label.setOpaque(true);
+			label.setFont(label.getFont().deriveFont(Font.BOLD));
+			label.setBorder(BorderFactory.createCompoundBorder(
+				BorderFactory.createLineBorder(new Color(55, 105, 140)),
+				BorderFactory.createEmptyBorder(5, 6, 5, 6)));
+			Dimension noticeSize = new Dimension(REQUIREMENT_NOTICE_WIDTH, label.getPreferredSize().height);
+			label.setPreferredSize(noticeSize);
+			label.setMaximumSize(noticeSize);
+		}
+		else if (text.trim().startsWith("✓"))
 			label.setForeground(new Color(55, 170, 75));
 		else if (text.trim().startsWith("✕"))
 			label.setForeground(new Color(195, 70, 60));

@@ -50,6 +50,16 @@ final class WomMembership
 		return STAFF_ROLES.contains(role.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_'));
 	}
 
+	static boolean canPublishBroadcast(String role)
+	{
+		if (!isStaffRole(role))
+		{
+			return false;
+		}
+		String normalizedRole = role.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+		return !"administrator".equals(normalizedRole);
+	}
+
 	static String normalizePlayerName(String playerName)
 	{
 		if (playerName == null)

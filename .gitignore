@@ -10,6 +10,7 @@ nbproject/
 
 # Local development server and generated data are deployed separately.
 server/
+tools/
 
 # Local agent/development notes.
 AGENTS.md

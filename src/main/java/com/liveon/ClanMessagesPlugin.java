@@ -34,10 +34,10 @@ import net.runelite.api.ScriptID;
 import net.runelite.api.WorldType;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Item;
-import net.runelite.api.InventoryID;
 import net.runelite.api.clan.ClanRank;
 import net.runelite.api.clan.ClanTitle;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarbitID;
@@ -69,6 +69,7 @@ import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.plugins.loottracker.LootTrackerConfig;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -91,6 +92,15 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern RANK_REQUEST_MESSAGE_PATTERN = Pattern.compile("(?<player>.+) solicitou um rank: (?<rank>.+)");
 	private static final Pattern PROMOTION_MESSAGE_PATTERN = Pattern.compile("(?:Promo\u00E7\u00E3o: )?(?<player>.+?) foi promovido para (?<rank>.+)!");
 	private static final Pattern URL_PATTERN = Pattern.compile("(?i)\\bhttps?://[^\\s<>]+");
+	private static final Pattern PET_TRIGGER_PATTERN = Pattern.compile(
+		"You (?:have a funny feeling like you|feel something weird sneaking).*", Pattern.CASE_INSENSITIVE);
+	private static final Pattern PET_CLAN_PATTERN = Pattern.compile(
+		"\\b(?<user>[\\w\\s]+) (?:has a funny feeling like .+ followed|feels something weird sneaking into .+ backpack|feels like .+ acquired something special): (?:(?<pet>.+) at (?<milestone>.+)|(?<petOnly>.+))",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern PET_UNTRADEABLE_PATTERN = Pattern.compile("Untradeable drop: (.+)", Pattern.CASE_INSENSITIVE);
+	private static final Pattern PET_COLLECTION_PATTERN = Pattern.compile(
+		"(?:New item added to your collection log|Collection log):\\s*(.+)", Pattern.CASE_INSENSITIVE);
+	private static final int PET_DETAILS_WAIT_TICKS = 5;
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
@@ -116,6 +126,7 @@ public class ClanMessagesPlugin extends Plugin
 	@Inject private ChatIconManager chatIconManager;
 	@Inject private ClientThread clientThread;
 	@Inject private ItemManager itemManager;
+	@Inject private DropRarityService dropRarityService;
 	@Inject private DrawManager drawManager;
 	@Inject private ChatMessageBuilder chatMessageBuilder;
 	@Inject private ChatMessageManager chatMessageManager;
@@ -145,12 +156,21 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private boolean isStaff = false;
+	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
 	private volatile String authenticatedPlayerName = "";
 	private int lastCombatAchievementPoints = -1;
 	private String combatAchievementAccount = "";
 	private int lastQuestPoints = -1;
 	private int lastMaximumQuestPoints = -1;
+	private boolean pendingPet;
+	private String pendingPetName;
+	private String pendingPetMilestone;
+	private String pendingPetGameMessage;
+	private boolean pendingPetDuplicate;
+	private boolean pendingPetBackpack;
+	private Boolean pendingPetPreviouslyOwned;
+	private int pendingPetTicks;
 	private String questAccount = "";
 	private boolean rankSyncCompleted;
 	private boolean rankWidgetRefreshPending;
@@ -163,6 +183,9 @@ public class ClanMessagesPlugin extends Plugin
 	// If true, the user manually disconnected and auto-verification should be paused until they click Verify
 	private final java.util.Map<String, LiveChannel> onlineLiveChannels = new java.util.concurrent.ConcurrentHashMap<>();
 	private final java.util.Set<String> mvpMembers = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private final java.util.Map<String, java.util.List<ClanTag>> clanTagsByPlayer = new java.util.concurrent.ConcurrentHashMap<>();
+	private final java.util.Set<String> knownClanTagMarkup = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private volatile boolean isDeputyOwner;
 	private ClanLiveBadgeDecorator clanLiveBadgeDecorator;
 
 	@Override
@@ -171,24 +194,25 @@ public class ClanMessagesPlugin extends Plugin
 		executor = Executors.newSingleThreadScheduledExecutor();
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
-		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, config.staffAccessKey(), this::saveStaffAccessKey);
+		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, config.staffAccessKey(), this::saveStaffAccessKey);
 		panel.clearRankDetails();
 		if (config.enabled())
 		{
+			panel.setConnectionDisabled(false);
 			verifyToken();
 		}
-		navigationButton = NavigationButton.builder()
-			.tooltip("Live on clan")
-			.icon(createIcon())
-			.panel(panel)
-			.build();
-		clientToolbar.addNavigation(navigationButton);
+		else
+		{
+			panel.setConnectionDisabled(true);
+		}
+		rebuildNavigationButton();
 		configurePolling();
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		resetPendingPet();
 		if (pollingTask != null)
 		{
 			pollingTask.cancel(false);
@@ -224,8 +248,12 @@ public class ClanMessagesPlugin extends Plugin
 		verifiedAccount = "";
 		authenticatedPlayerName = "";
 		isStaff = false;
+		isDeputyOwner = false;
+		canPublishBroadcast = false;
 		onlineLiveChannels.clear();
 		mvpMembers.clear();
+		clanTagsByPlayer.clear();
+		knownClanTagMarkup.clear();
 		panel = null;
 	}
 
@@ -234,10 +262,15 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if ("live-on-clan-messages".equals(event.getGroup()))
 		{
+			if ("sidebarIconPriority".equals(event.getKey()))
+			{
+				rebuildNavigationButton();
+			}
 			if ("enabled".equals(event.getKey()))
 			{
 				if (config.enabled())
 				{
+					if (panel != null) panel.setConnectionDisabled(false);
 					verifyToken(true);
 				}
 				else
@@ -251,12 +284,14 @@ public class ClanMessagesPlugin extends Plugin
 					authenticatedPlayerName = "";
 					verifiedAccount = "";
 					isStaff = false;
+					isDeputyOwner = false;
 					onlineLiveChannels.clear();
 					mvpMembers.clear();
+					clanTagsByPlayer.clear();
 					if (panel != null)
 					{
 						panel.setAuthenticated(false, false);
-						panel.setStatus("Conexao com o clan desativada");
+						panel.setConnectionDisabled(true);
 					}
 				}
 			}
@@ -316,7 +351,7 @@ public class ClanMessagesPlugin extends Plugin
 				continue;
 			}
 			addedUrls.add(url);
-			client.createMenuEntry(menuPosition++)
+			client.getMenu().createMenuEntry(menuPosition++)
 				.setOption("Open link")
 				.setTarget(url)
 				.setType(MenuAction.RUNELITE)
@@ -338,19 +373,58 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (event.getType() != ChatMessageType.GAMEMESSAGE && event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION)
+		if (event.getType() != ChatMessageType.GAMEMESSAGE
+			&& event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION
+			&& event.getType() != ChatMessageType.CLAN_MESSAGE)
 		{
 			return;
 		}
-		String message = event.getMessage().replaceAll("<[^>]*>", "");
-		if (message.contains("funny feeling") || message.contains("being followed") || message.contains("sneaking into your backpack"))
+		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
+		if (event.getType() == ChatMessageType.GAMEMESSAGE && PET_TRIGGER_PATTERN.matcher(message).matches())
 		{
 			if (config.discordDropsEnabled() && client.getLocalPlayer() != null)
 			{
-				String player = client.getLocalPlayer().getName();
-				drawManager.requestNextFrameListener(image -> sendPetNotification(player, image));
+				pendingPet = true;
+				pendingPetName = null;
+				pendingPetMilestone = null;
+				pendingPetGameMessage = message;
+				pendingPetDuplicate = message.toLowerCase(java.util.Locale.ROOT).contains("would have been");
+				pendingPetBackpack = message.toLowerCase(java.util.Locale.ROOT).contains("backpack");
+				pendingPetPreviouslyOwned = pendingPetDuplicate ? Boolean.TRUE : null;
+				pendingPetTicks = 0;
 			}
 			return;
+		}
+		if (!pendingPet)
+		{
+			return;
+		}
+		Matcher itemMatcher = PET_UNTRADEABLE_PATTERN.matcher(message);
+		if (!itemMatcher.find())
+		{
+			itemMatcher = PET_COLLECTION_PATTERN.matcher(message);
+		}
+		if (itemMatcher.find(0))
+		{
+			pendingPetName = itemMatcher.group(1).trim();
+			if (PET_COLLECTION_PATTERN.matcher(message).find())
+			{
+				pendingPetPreviouslyOwned = Boolean.FALSE;
+			}
+		}
+		if (message.toLowerCase(java.util.Locale.ROOT).contains("automatically insured"))
+		{
+			pendingPetPreviouslyOwned = Boolean.FALSE;
+		}
+		Matcher clanMatcher = PET_CLAN_PATTERN.matcher(message);
+		if (clanMatcher.find() && client.getLocalPlayer() != null
+			&& WomMembership.normalizePlayerName(clanMatcher.group("user"))
+				.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName())))
+		{
+			String pet = clanMatcher.group("pet");
+			pendingPetName = (pet == null ? clanMatcher.group("petOnly") : pet).trim();
+			String milestone = clanMatcher.group("milestone");
+			pendingPetMilestone = milestone == null ? null : milestone.replaceFirst("\\.$", "").trim();
 		}
 	}
 
@@ -363,6 +437,7 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		Object[] objectStack = client.getObjectStack();
 		int objectStackSize = client.getObjectStackSize();
+		decorateAchievementMessage(objectStack, objectStackSize);
 		if (objectStackSize < 2 || !(objectStack[1] instanceof String))
 		{
 			return;
@@ -377,7 +452,8 @@ public class ClanMessagesPlugin extends Plugin
 			plainSender.substring(0, plainSender.length() - 1));
 		boolean isMvp = mvpMembers.contains(playerKey);
 		boolean isLive = config.liveStatusEnabled() && onlineLiveChannels.containsKey(playerKey);
-		if (!isMvp && !isLive)
+		String tagBadges = clanTagBadges(playerKey);
+		if (!isMvp && !isLive && tagBadges.isEmpty())
 		{
 			return;
 		}
@@ -390,6 +466,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			badges.append(" <col=96ffaa>LIVE</col>");
 		}
+		badges.append(tagBadges);
 		int colonIndex = sender.lastIndexOf(':');
 		if (badges.length() > 0 && colonIndex >= 0 && !sender.contains(badges.toString()))
 		{
@@ -398,6 +475,74 @@ public class ClanMessagesPlugin extends Plugin
 			objectStack[1] = sender.substring(0, colonIndex) + badges
 				+ sender.substring(colonIndex);
 		}
+	}
+
+	private void decorateAchievementMessage(Object[] objectStack, int objectStackSize)
+	{
+		if (objectStackSize < 3 || !(objectStack[2] instanceof String))
+		{
+			return;
+		}
+		String message = (String) objectStack[2];
+		String plainMessage = Text.removeTags(message).replace('\u00A0', ' ').trim();
+		String lowerMessage = plainMessage.toLowerCase(java.util.Locale.ROOT);
+		if (!(lowerMessage.contains(" received a new collection log item:")
+			|| lowerMessage.contains(" has a funny feeling like")
+			|| lowerMessage.contains(" feels something weird sneaking into")))
+		{
+			return;
+		}
+
+		java.util.Set<String> decoratedPlayers = new java.util.HashSet<>(mvpMembers);
+		decoratedPlayers.addAll(clanTagsByPlayer.keySet());
+		if (config.liveStatusEnabled())
+		{
+			decoratedPlayers.addAll(onlineLiveChannels.keySet());
+		}
+		for (String playerKey : decoratedPlayers)
+		{
+			if (!lowerMessage.startsWith(playerKey + " "))
+			{
+				continue;
+			}
+			boolean isMvp = mvpMembers.contains(playerKey);
+			boolean isLive = config.liveStatusEnabled() && onlineLiveChannels.containsKey(playerKey);
+			StringBuilder badges = new StringBuilder();
+			if (isMvp) badges.append(" <col=ffc628>MVP</col>");
+			if (isLive) badges.append(" <col=96ffaa>LIVE</col>");
+			badges.append(clanTagBadges(playerKey));
+			int insertionIndex = originalIndexAfterVisiblePrefix(message, playerKey);
+			if (badges.length() > 0 && insertionIndex >= 0)
+			{
+				objectStack[2] = message.substring(0, insertionIndex) + badges
+					+ message.substring(insertionIndex);
+			}
+			return;
+		}
+	}
+
+	private static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
+	{
+		int originalIndex = 0;
+		int visibleIndex = 0;
+		while (originalIndex < text.length() && visibleIndex < visiblePrefix.length())
+		{
+			if (text.charAt(originalIndex) == '<')
+			{
+				int tagEnd = text.indexOf('>', originalIndex);
+				if (tagEnd < 0) return -1;
+				originalIndex = tagEnd + 1;
+				continue;
+			}
+			char actual = text.charAt(originalIndex) == '\u00A0' ? ' ' : text.charAt(originalIndex);
+			if (Character.toLowerCase(actual) != Character.toLowerCase(visiblePrefix.charAt(visibleIndex)))
+			{
+				return -1;
+			}
+			originalIndex++;
+			visibleIndex++;
+		}
+		return visibleIndex == visiblePrefix.length() ? originalIndex : -1;
 	}
 
 	@Subscribe
@@ -435,6 +580,8 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		List<String> notableItems = new ArrayList<>();
 		List<Map<String, Object>> dinkItems = new ArrayList<>();
+		long notifiedValue = 0L;
+		Double rarestProbability = null;
 		int thumbnailItemId = -1;
 		for (ItemStack item : items)
 		{
@@ -447,16 +594,23 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				thumbnailItemId = item.getId();
 			}
+			notifiedValue += value;
 			String itemName = itemManager.getItemComposition(item.getId()).getName();
-			String displayName = item.getQuantity() > 1 ? item.getQuantity() + " x " + itemName : itemName;
-			notableItems.add(discordWikiLink(displayName, itemName));
+			java.util.OptionalDouble itemRarity = dropRarityService.getRarity(source, item.getId(), item.getQuantity());
+			Double rarity = itemRarity.isPresent() ? itemRarity.getAsDouble() : null;
+			if (rarity != null && (rarestProbability == null || rarity < rarestProbability))
+			{
+				rarestProbability = rarity;
+			}
+			String displayName = item.getQuantity() + "x " + itemName;
+			notableItems.add(discordWikiLink(displayName, itemName) + " (" + formatDropValue(value) + ")");
 			Map<String, Object> dinkItem = new LinkedHashMap<>();
 			dinkItem.put("id", item.getId());
 			dinkItem.put("quantity", item.getQuantity());
 			dinkItem.put("priceEach", itemManager.getItemPrice(item.getId()));
 			dinkItem.put("name", itemName);
 			dinkItem.put("criteria", java.util.Collections.singletonList("VALUE"));
-			dinkItem.put("rarity", null);
+			dinkItem.put("rarity", rarity);
 			dinkItems.add(dinkItem);
 		}
 		if (notableItems.isEmpty())
@@ -465,11 +619,14 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		String playerName = client.getLocalPlayer() == null ? "Jogador" : client.getLocalPlayer().getName();
 		String sourceName = source == null ? "Loot" : source;
-		String description = "Just got " + joinNaturalLanguage(notableItems) + " from "
-			+ discordWikiLink(sourceName, sourceName);
+		String description = String.join("\n", notableItems) + "\n" + discordWikiLink(sourceName, sourceName);
 		final int dropThumbnailItemId = thumbnailItemId;
+		final long dropTotalValue = notifiedValue;
+		final Double dropRarestProbability = rarestProbability;
+		final Integer dropKillCount = readDropKillCount(category, sourceName);
 		drawManager.requestNextFrameListener(image -> sendDiscordDrop(playerName, description,
-			dropThumbnailItemId, sourceName, category, npcId, dinkItems, image));
+			dropThumbnailItemId, sourceName, category, npcId, dinkItems, dropTotalValue,
+			dropKillCount, dropRarestProbability, image));
 	}
 
 	private static String discordWikiLink(String label, String search)
@@ -482,20 +639,6 @@ public class ClanMessagesPlugin extends Plugin
 			.toString()
 			.replace(")", "\\)");
 		return "[" + label + "](" + url + ")";
-	}
-
-	private static String joinNaturalLanguage(List<String> values)
-	{
-		if (values.size() == 1)
-		{
-			return values.get(0);
-		}
-		if (values.size() == 2)
-		{
-			return values.get(0) + " and " + values.get(1);
-		}
-		return String.join(", ", values.subList(0, values.size() - 1))
-			+ ", and " + values.get(values.size() - 1);
 	}
 
 	private boolean isTemporaryLootWorld()
@@ -550,7 +693,7 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
-		if (event.getContainerId() == InventoryID.BANK.getId())
+		if (event.getContainerId() == InventoryID.BANK)
 		{
 			if (client.getLocalPlayer() == null) return;
 			ensureRankBankAccount(client.getLocalPlayer().getName());
@@ -561,8 +704,8 @@ public class ClanMessagesPlugin extends Plugin
 			rankBankLoaded = true;
 			refreshRanksAutomatically();
 		}
-		else if (event.getContainerId() == InventoryID.INVENTORY.getId()
-			|| event.getContainerId() == InventoryID.EQUIPMENT.getId())
+		else if (event.getContainerId() == InventoryID.INV
+			|| event.getContainerId() == InventoryID.WORN)
 		{
 			refreshRanksAutomatically();
 		}
@@ -619,10 +762,10 @@ public class ClanMessagesPlugin extends Plugin
 		ensureRankBankAccount(accountName);
 		java.util.Set<String> items = new java.util.HashSet<>();
 		java.util.Set<Integer> itemIds = new java.util.HashSet<>();
-		collectItemNames(client.getItemContainer(InventoryID.INVENTORY), items);
-		collectItemNames(client.getItemContainer(InventoryID.EQUIPMENT), items);
-		collectItemIds(client.getItemContainer(InventoryID.INVENTORY), itemIds);
-		collectItemIds(client.getItemContainer(InventoryID.EQUIPMENT), itemIds);
+		collectItemNames(client.getItemContainer(InventoryID.INV), items);
+		collectItemNames(client.getItemContainer(InventoryID.WORN), items);
+		collectItemIds(client.getItemContainer(InventoryID.INV), itemIds);
+		collectItemIds(client.getItemContainer(InventoryID.WORN), itemIds);
 		if (rankBankLoaded)
 		{
 			items.addAll(rankBankItems);
@@ -1413,7 +1556,8 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
-		String category, Integer npcId, List<Map<String, Object>> items, java.awt.Image screenshot)
+		String category, Integer npcId, List<Map<String, Object>> items, long totalValue,
+		Integer killCount, Double rarestProbability, java.awt.Image screenshot)
 	{
 		if (screenshot == null)
 		{
@@ -1421,9 +1565,24 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		Map<String, Object> embed = new LinkedHashMap<>();
+		embed.put("title", "Loot Drop");
 		embed.put("description", description);
-		embed.put("color", 7895160);
+		embed.put("color", dropEmbedColor(totalValue));
 		embed.put("author", author(playerName));
+		embed.put("timestamp", Instant.now().toString());
+		embed.put("footer", footer());
+		List<Map<String, Object>> fields = new ArrayList<>();
+		if (killCount != null)
+		{
+			fields.add(embedField(dropCountLabel(category), discordCodeBlock(String.format(
+				java.util.Locale.ROOT, "%,d", killCount)), true));
+		}
+		fields.add(embedField("Total Value", discordCodeBlock(formatGp(totalValue)), true));
+		if (rarestProbability != null)
+		{
+			fields.add(embedField("Item Rarity", discordCodeBlock(formatProbability(rarestProbability)), true));
+		}
+		embed.put("fields", fields);
 		Map<String, Object> thumbnail = new LinkedHashMap<>();
 		thumbnail.put("url", "https://static.runelite.net/cache/item/icon/" + thumbnailItemId + ".png");
 		embed.put("thumbnail", thumbnail);
@@ -1444,10 +1603,12 @@ public class ClanMessagesPlugin extends Plugin
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("items", items);
 		extra.put("source", source);
-		extra.put("party", java.util.Collections.singletonList(playerName));
+		// Dink only populates party for supported raids. An empty list is safer
+		// than claiming that every ordinary NPC/event drop came from a solo party.
+		extra.put("party", java.util.Collections.emptyList());
 		extra.put("category", category);
-		extra.put("killCount", null);
-		extra.put("rarestProbability", null);
+		extra.put("killCount", killCount);
+		extra.put("rarestProbability", rarestProbability);
 		extra.put("npcId", npcId);
 		payload.put("extra", extra);
 		try
@@ -1491,6 +1652,125 @@ public class ClanMessagesPlugin extends Plugin
 		}
 	}
 
+	private static Map<String, Object> embedField(String name, String value, boolean inline)
+	{
+		Map<String, Object> field = new LinkedHashMap<>();
+		field.put("name", name);
+		field.put("value", value == null || value.trim().isEmpty() ? "-" : value);
+		field.put("inline", inline);
+		return field;
+	}
+
+	private static String discordCodeBlock(String value)
+	{
+		String safe = value == null ? "-" : value.replace("```", "'''");
+		return "```\n" + safe + "\n```";
+	}
+
+	private static String formatGp(long value)
+	{
+		if (value >= 1_000_000_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fB GP", value / 1_000_000_000.0);
+		}
+		if (value >= 1_000_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fM GP", value / 1_000_000.0);
+		}
+		if (value >= 1_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fK GP", value / 1_000.0);
+		}
+		return value + " GP";
+	}
+
+	private static int dropEmbedColor(long totalValue)
+	{
+		if (totalValue >= 500_000_000L)
+		{
+			return 0xFF2E94;
+		}
+		if (totalValue >= 100_000_000L)
+		{
+			return 0xFF7F00;
+		}
+		if (totalValue >= 50_000_000L)
+		{
+			return 0x99FF99;
+		}
+		return 0x66B2FF;
+	}
+
+	private static String formatDropValue(long value)
+	{
+		if (value >= 1_000_000_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fB", value / 1_000_000_000.0);
+		}
+		if (value >= 1_000_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fM", value / 1_000_000.0);
+		}
+		if (value >= 1_000L)
+		{
+			return String.format(java.util.Locale.ROOT, "%.1fK", value / 1_000.0);
+		}
+		return String.valueOf(value);
+	}
+
+	private Integer readDropKillCount(String category, String source)
+	{
+		if (source == null || source.trim().isEmpty()) return null;
+		Integer chatCount = configManager.getRSProfileConfiguration("killcount", cleanBossName(source), int.class);
+		if (chatCount != null && chatCount > 0) return chatCount;
+		try
+		{
+			String stored = configManager.getConfiguration(LootTrackerConfig.GROUP,
+				configManager.getRSProfileKey(), "drops_" + category + "_" + source);
+			if (stored == null) return null;
+			com.google.gson.JsonObject record = gson.fromJson(stored, com.google.gson.JsonObject.class);
+			if (record == null || !record.has("kills")) return null;
+			int kills = record.get("kills").getAsInt();
+			return kills >= 0 ? kills + 1 : null;
+		}
+		catch (RuntimeException exception)
+		{
+			log.debug("Unable to read loot tracker KC for {}", source, exception);
+			return null;
+		}
+	}
+
+	private static String cleanBossName(String source)
+	{
+		String clean = source.toLowerCase(java.util.Locale.ROOT).replace(":", "");
+		if ("the leviathan".equals(clean)) return "leviathan";
+		if ("the whisperer".equals(clean)) return "whisperer";
+		if ("the hueycoatl".equals(clean)) return "hueycoatl";
+		if (clean.startsWith("barrows")) return "barrows chests";
+		return clean;
+	}
+
+	private static String dropCountLabel(String category)
+	{
+		if ("PICKPOCKET".equals(category)) return "Pickpocket Count";
+		if ("EVENT".equals(category)) return "Completion Count";
+		return "Kill Count";
+	}
+
+	private static String formatProbability(double probability)
+	{
+		if (!(probability > 0.0) || !Double.isFinite(probability)) return "Indisponível";
+		double denominator = 1.0 / probability;
+		return String.format(java.util.Locale.ROOT, "1 in %,.1f (%.3g%%)", denominator, probability * 100.0);
+	}
+
+	private static String petSourceFromMilestone(String milestone)
+	{
+		if (milestone == null) return null;
+		Matcher matcher = Pattern.compile("(?i)\\bfrom\\s+(.+)$").matcher(milestone.trim());
+		return matcher.find() ? matcher.group(1).replaceFirst("\\.$", "").trim() : null;
+	}
+
 	/**
 	 * Dink consumers expect a stable, opaque per-account identifier. Keep a
 	 * locally generated value instead of deriving it from the RSN, so renames do
@@ -1516,7 +1796,8 @@ public class ClanMessagesPlugin extends Plugin
 		return result;
 	}
 
-	private void sendPetNotification(String playerName, java.awt.Image screenshot)
+	private void sendPetNotification(String playerName, String petName, String milestone, String gameMessage,
+		boolean duplicate, boolean backpack, Boolean previouslyOwned, java.awt.Image screenshot)
 	{
 		if (screenshot == null)
 		{
@@ -1524,12 +1805,55 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		Map<String, Object> embed = new LinkedHashMap<>();
-		embed.put("title", "Pet Drop");
-		embed.put("description", "A pet was obtained.");
+		embed.put("title", duplicate ? "Dupe pet obtained!" : "New pet obtained!");
+		String description;
+		if (backpack)
+		{
+			description = playerName + " feels something weird sneaking into their backpack";
+		}
+		else if (duplicate)
+		{
+			description = playerName + " has a funny feeling like they would have been followed...";
+		}
+		else
+		{
+			description = playerName + " has a funny feeling like they're being followed";
+		}
+		embed.put("description", description);
 		embed.put("timestamp", Instant.now().toString());
-		embed.put("color", 7895160);
+		embed.put("color", duplicate ? 0xED4245 : 0x57F287);
 		embed.put("footer", footer());
 		embed.put("author", author(playerName));
+		List<Map<String, Object>> fields = new ArrayList<>();
+		if (petName != null && !petName.trim().isEmpty())
+		{
+			fields.add(embedField("Name", discordCodeBlock(petName.trim()), true));
+		}
+		String status = duplicate ? "Already owned" : Boolean.FALSE.equals(previouslyOwned) ? "New!" : "Previously owned";
+		fields.add(embedField("Status", discordCodeBlock(status), true));
+		String petSource = petSourceFromMilestone(milestone);
+		Double petRarity = null;
+		if (milestone != null && !milestone.trim().isEmpty())
+		{
+			fields.add(embedField("KC", discordCodeBlock(milestone.trim()), true));
+		}
+		if (petName != null && petSource != null)
+		{
+			java.util.OptionalDouble rarity = dropRarityService.getRarityByItemName(petSource, petName.trim());
+			if (rarity.isPresent())
+			{
+				petRarity = rarity.getAsDouble();
+				fields.add(embedField("Rarity", discordCodeBlock(formatProbability(petRarity)), true));
+			}
+			java.util.OptionalInt petItemId = dropRarityService.findItemId(petSource, petName.trim());
+			if (petItemId.isPresent())
+			{
+				Map<String, Object> thumbnail = new LinkedHashMap<>();
+				thumbnail.put("url", "https://static.runelite.net/cache/item/icon/" + petItemId.getAsInt() + ".png");
+				embed.put("thumbnail", thumbnail);
+			}
+		}
+		embed.put("fields", fields);
 		if (screenshot != null)
 		{
 			Map<String, Object> image = new LinkedHashMap<>();
@@ -1540,6 +1864,26 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("content", "");
 		payload.put("tts", false);
 		payload.put("embeds", java.util.Collections.singletonList(embed));
+		payload.put("type", "PET");
+		payload.put("playerName", playerName);
+		payload.put("accountType", String.valueOf(client.getAccountType()));
+		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
+		payload.put("dinkAccountHash", liveOnAccountHash(playerName));
+		payload.put("world", client.getWorld());
+		Map<String, Object> extra = new LinkedHashMap<>();
+		if (petName != null && !petName.trim().isEmpty())
+		{
+			extra.put("petName", petName.trim());
+		}
+		if (milestone != null && !milestone.trim().isEmpty())
+		{
+			extra.put("milestone", milestone.trim());
+		}
+		extra.put("duplicate", duplicate);
+		extra.put("previouslyOwned", previouslyOwned);
+		if (petRarity != null) extra.put("rarity", petRarity);
+		extra.put("gameMessage", gameMessage);
+		payload.put("extra", extra);
 		try
 		{
 			MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("payload_json", gson.toJson(payload));
@@ -1547,7 +1891,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
 				ImageIO.write((BufferedImage) screenshot, "png", output);
-				multipart.addFormDataPart("files[0]", "loot.png", RequestBody.create(MediaType.parse("image/png"), output.toByteArray()));
+				multipart.addFormDataPart("file", "pet.png", RequestBody.create(MediaType.parse("image/png"), output.toByteArray()));
 			}
 			Request request = discordNotificationRequest(multipart.build());
 			if (request == null)
@@ -1574,17 +1918,42 @@ public class ClanMessagesPlugin extends Plugin
 	private static Map<String, Object> footer()
 	{
 		Map<String, Object> footer = new LinkedHashMap<>();
-		footer.put("text", "Live on");
-		footer.put("icon_url", "https://i.imgur.com/m8ogvRt.png");
+		footer.put("text", "Enviado pelo Live ON Clan Plugin");
+		footer.put("icon_url", "https://raw.githubusercontent.com/MilicoOSRS/live-on-clan/master/src/main/resources/live-on-logo.png");
 		return footer;
 	}
 
-	private static Map<String, Object> author(String playerName)
+	private Map<String, Object> author(String playerName)
 	{
 		Map<String, Object> author = new LinkedHashMap<>();
 		author.put("name", playerName);
 		author.put("url", "https://wiseoldman.net/players/" + playerName.replace(" ", "%20"));
+		String badgeUrl = accountBadgeUrl(String.valueOf(client.getAccountType()),
+			client.getWorldType().contains(WorldType.SEASONAL));
+		if (badgeUrl != null)
+		{
+			author.put("icon_url", badgeUrl);
+		}
 		return author;
+	}
+
+	private static String accountBadgeUrl(String accountType, boolean seasonal)
+	{
+		final String wikiImages = "https://oldschool.runescape.wiki/images/";
+		if (seasonal)
+		{
+			return wikiImages + "Leagues_chat_badge.png";
+		}
+		switch (accountType)
+		{
+			case "IRONMAN": return wikiImages + "Ironman_chat_badge.png";
+			case "ULTIMATE_IRONMAN": return wikiImages + "Ultimate_ironman_chat_badge.png";
+			case "HARDCORE_IRONMAN": return wikiImages + "Hardcore_ironman_chat_badge.png";
+			case "GROUP_IRONMAN": return wikiImages + "Group_ironman_chat_badge.png";
+			case "HARDCORE_GROUP_IRONMAN": return wikiImages + "Hardcore_group_ironman_chat_badge.png";
+			case "UNRANKED_GROUP_IRONMAN": return wikiImages + "Unranked_group_ironman_chat_badge.png";
+			default: return null;
+		}
 	}
 
 	private static final class SilentCallback implements okhttp3.Callback
@@ -1596,6 +1965,19 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		if (pendingPet && (pendingPetMilestone != null || ++pendingPetTicks > PET_DETAILS_WAIT_TICKS))
+		{
+			String playerName = client.getLocalPlayer() == null ? "Jogador" : client.getLocalPlayer().getName();
+			String petName = pendingPetName;
+			String milestone = pendingPetMilestone;
+			String gameMessage = pendingPetGameMessage;
+			boolean duplicate = pendingPetDuplicate;
+			boolean backpack = pendingPetBackpack;
+			Boolean previouslyOwned = pendingPetPreviouslyOwned == null ? Boolean.TRUE : pendingPetPreviouslyOwned;
+			resetPendingPet();
+			drawManager.requestNextFrameListener(image -> sendPetNotification(playerName, petName, milestone,
+				gameMessage, duplicate, backpack, previouslyOwned, image));
+		}
 		if (clanLiveBadgeDecorator != null)
 		{
 			clanLiveBadgeDecorator.refresh();
@@ -1609,6 +1991,18 @@ public class ClanMessagesPlugin extends Plugin
 				verifyToken();
 			}
 		}
+	}
+
+	private void resetPendingPet()
+	{
+		pendingPet = false;
+		pendingPetName = null;
+		pendingPetMilestone = null;
+		pendingPetGameMessage = null;
+		pendingPetDuplicate = false;
+		pendingPetBackpack = false;
+		pendingPetPreviouslyOwned = null;
+		pendingPetTicks = 0;
 	}
 
 	private synchronized void configurePolling()
@@ -1628,15 +2022,15 @@ public class ClanMessagesPlugin extends Plugin
 			mvpDropsPollingTask.cancel(false);
 			mvpDropsPollingTask = null;
 		}
-		if (panel == null || !config.enabled() || serverBaseUrl() == null)
+		if (panel == null || !config.enabled() || serverBaseUrl() == null
+			|| authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
-			if (panel != null) panel.setStatus("Configure o servidor");
 			return;
 		}
 		long interval = Math.max(5, config.pollIntervalSeconds());
 		pollingTask = executor.scheduleAtFixedRate(this::fetchMessages, 0, interval, TimeUnit.SECONDS);
 		mvpDropsPollingTask = executor.scheduleAtFixedRate(this::fetchMvpRankings, 2, 60, TimeUnit.SECONDS);
-		if (isStaff)
+		if (isStaff && hasStaffAccessKey())
 		{
 			rankRequestsPollingTask = executor.scheduleAtFixedRate(this::fetchRankRequests, 10, interval, TimeUnit.SECONDS);
 		}
@@ -1724,7 +2118,7 @@ public class ClanMessagesPlugin extends Plugin
 							queueBroadcast(message.getMessage(), "CLAN".equalsIgnoreCase(message.getMode()));
 						}
 					}
-					if (panel != null) panel.setStatus("Conectado");
+					if (panel != null) panel.setAuthenticatedPlayer(authenticatedPlayerName);
 				}
 				finally
 				{
@@ -1774,6 +2168,7 @@ public class ClanMessagesPlugin extends Plugin
 		fetchMvpEfficiency();
 		fetchLives();
 		fetchMvpMembers();
+		fetchClanTags();
 	}
 
 	private void fetchMvpEfficiency()
@@ -1820,7 +2215,7 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		getJson("lives", liveChannelsCallback(false));
-		if (isStaff)
+		if (isStaff && hasStaffAccessKey())
 		{
 			getJson("admin/live-channels", liveChannelsCallback(true));
 		}
@@ -1944,7 +2339,7 @@ public class ClanMessagesPlugin extends Plugin
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
 				log.debug("Unable to fetch MVP members", exception);
-				if (isStaff && panel != null) panel.setMvpMembersStatus("Falha ao atualizar");
+				if (isDeputyOwner && panel != null) panel.setMvpMembersStatus("Falha ao atualizar");
 			}
 
 			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
@@ -1953,7 +2348,7 @@ public class ClanMessagesPlugin extends Plugin
 				{
 					if (!response.isSuccessful() || response.body() == null)
 					{
-						if (isStaff && panel != null) panel.setMvpMembersStatus("Erro " + response.code());
+						if (isDeputyOwner && panel != null) panel.setMvpMembersStatus("Erro " + response.code());
 						return;
 					}
 					MvpMember[] parsed = gson.fromJson(response.body().string(), MvpMember[].class);
@@ -1968,7 +2363,7 @@ public class ClanMessagesPlugin extends Plugin
 							mvpMembers.add(normalizeChatPlayerName(member.playerName));
 						}
 					}
-					if (isStaff && panel != null) panel.updateMvpMembers(members);
+					if (isDeputyOwner && panel != null) panel.updateMvpMembers(members);
 					clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
 				}
 			}
@@ -1977,7 +2372,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void saveMvpMember(String rsn)
 	{
-		if (!isStaff || rsn == null || rsn.trim().isEmpty())
+		if (!isDeputyOwner || rsn == null || rsn.trim().isEmpty())
 		{
 			if (panel != null) panel.setMvpMembersStatus("Informe o nome do membro");
 			return;
@@ -2010,7 +2405,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void deleteMvpMember(MvpMember member)
 	{
-		if (!isStaff || member == null)
+		if (!isDeputyOwner || member == null)
 		{
 			return;
 		}
@@ -2037,9 +2432,131 @@ public class ClanMessagesPlugin extends Plugin
 		});
 	}
 
+	private void fetchClanTags()
+	{
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
+		{
+			clanTagsByPlayer.clear();
+			return;
+		}
+		getJson("clan-tags", new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch clan tags", exception);
+				if (isDeputyOwner && panel != null) panel.setClanTagsStatus("Falha ao atualizar");
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful() || response.body() == null)
+					{
+						if (isDeputyOwner && panel != null) panel.setClanTagsStatus("Erro " + response.code());
+						return;
+					}
+					ClanTagsResponse parsed = gson.fromJson(response.body().string(), ClanTagsResponse.class);
+					clanTagsByPlayer.clear();
+					if (parsed != null && parsed.tags != null)
+					{
+						for (ClanTag clanTag : parsed.tags)
+						{
+							String markup = clanTagMarkup(clanTag);
+							if (!markup.isEmpty()) knownClanTagMarkup.add(markup);
+							if (clanTag.members == null) continue;
+							for (ClanTagMember member : clanTag.members)
+							{
+								if (member.playerName == null) continue;
+								clanTagsByPlayer.computeIfAbsent(normalizeChatPlayerName(member.playerName), key -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(clanTag);
+							}
+						}
+					}
+					if (isDeputyOwner && panel != null) panel.updateClanTags(parsed);
+					clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+				}
+			}
+		});
+	}
+
+	private void createClanTag(String code, String color)
+	{
+		String normalizedCode = code == null ? "" : code.trim().toUpperCase(java.util.Locale.ROOT);
+		if (!isDeputyOwner || !normalizedCode.matches("[A-Z0-9]{1,5}"))
+		{
+			if (panel != null) panel.setClanTagsStatus(isDeputyOwner ? "Use de 1 a 5 letras ou números" : "Apenas Deputy Owner pode alterar");
+			return;
+		}
+		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("code", normalizedCode);
+		payload.put("color", color);
+		postJson("admin/clan-tags", gson.toJson(payload), clanTagWriteCallback("Etiqueta criada", panel::clearClanTagCode));
+	}
+
+	private void addClanTagMember(ClanTag clanTag, String rsn)
+	{
+		if (!isDeputyOwner || clanTag == null || rsn == null || rsn.trim().isEmpty())
+		{
+			if (panel != null) panel.setClanTagsStatus(isDeputyOwner ? "Informe o nome do membro" : "Apenas Deputy Owner pode alterar");
+			return;
+		}
+		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("rsn", rsn.trim());
+		postJson("admin/clan-tags/" + clanTag.id + "/members", gson.toJson(payload),
+			clanTagWriteCallback("Membro adicionado", panel::clearClanTagMember));
+	}
+
+	private void deleteClanTag(ClanTag clanTag)
+	{
+		if (!isDeputyOwner || clanTag == null) return;
+		deleteClanTagPath("admin/clan-tags/" + clanTag.id, "Etiqueta removida");
+	}
+
+	private void removeClanTagMember(ClanTag clanTag, ClanTagMember member)
+	{
+		if (!isDeputyOwner || clanTag == null || member == null) return;
+		deleteClanTagPath("admin/clan-tags/" + clanTag.id + "/members/" + member.id, "Membro removido");
+	}
+
+	private okhttp3.Callback clanTagWriteCallback(String success, Runnable clearAction)
+	{
+		return new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to update clan tags", exception);
+				if (panel != null) panel.setClanTagsStatus("Falha ao salvar");
+			}
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (panel != null) panel.setClanTagsStatus(response.isSuccessful() ? success : "Erro " + response.code());
+					if (response.isSuccessful())
+					{
+						if (clearAction != null) clearAction.run();
+						fetchClanTags();
+					}
+				}
+			}
+		};
+	}
+
+	private void deleteClanTagPath(String path, String success)
+	{
+		HttpUrl base = serverBaseUrl();
+		if (base == null) return;
+		HttpUrl.Builder builder = base.newBuilder();
+		for (String segment : path.split("/")) builder.addPathSegment(segment);
+		okHttpClient.newCall(requestBuilder(builder.build()).delete().build()).enqueue(clanTagWriteCallback(success, null));
+	}
+
 	boolean isLiveStatusVisible()
 	{
-		return (config.liveStatusEnabled() && !onlineLiveChannels.isEmpty()) || !mvpMembers.isEmpty();
+		return (config.liveStatusEnabled() && !onlineLiveChannels.isEmpty()) || !mvpMembers.isEmpty()
+			|| !clanTagsByPlayer.isEmpty();
 	}
 
 	boolean isPlayerLive(String playerName)
@@ -2053,10 +2570,43 @@ public class ClanMessagesPlugin extends Plugin
 		return mvpMembers.contains(normalizeChatPlayerName(playerName));
 	}
 
+	String clanTagBadges(String playerName)
+	{
+		java.util.List<ClanTag> tags = clanTagsByPlayer.get(normalizeChatPlayerName(playerName));
+		if (tags == null || tags.isEmpty()) return "";
+		StringBuilder badges = new StringBuilder();
+		for (ClanTag clanTag : tags) badges.append(clanTagMarkup(clanTag));
+		return badges.toString();
+	}
+
+	String removeKnownClanTagMarkup(String text)
+	{
+		String cleaned = text == null ? "" : text;
+		for (String markup : knownClanTagMarkup) cleaned = cleaned.replace(markup, "");
+		return cleaned;
+	}
+
+	private static String clanTagMarkup(ClanTag clanTag)
+	{
+		if (clanTag == null || clanTag.code == null || !clanTag.code.matches("[A-Z0-9]{1,5}")) return "";
+		String color;
+		switch (clanTag.color == null ? "" : clanTag.color.toLowerCase(java.util.Locale.ROOT))
+		{
+			case "red": color = "ff6464"; break;
+			case "blue": color = "66b2ff"; break;
+			case "green": color = "67d96d"; break;
+			case "purple": color = "c68cff"; break;
+			case "white": color = "ffffff"; break;
+			default: color = "ffc628";
+		}
+		return " <col=" + color + ">" + clanTag.code + "</col>";
+	}
+
 	String decoratedPlayerNameIn(String displayedText)
 	{
 		String normalized = normalizeChatPlayerName(displayedText);
 		if (mvpMembers.contains(normalized)) return displayedText;
+		if (clanTagsByPlayer.containsKey(normalized)) return displayedText;
 		for (Map.Entry<String, LiveChannel> entry : onlineLiveChannels.entrySet())
 		{
 			String key = entry.getKey();
@@ -2077,6 +2627,12 @@ public class ClanMessagesPlugin extends Plugin
 	static String normalizeChatPlayerName(String playerName)
 	{
 		return WomMembership.normalizePlayerName(playerName).toLowerCase(java.util.Locale.ROOT);
+	}
+
+	private static boolean isDeputyOwnerRole(String roleName)
+	{
+		return roleName != null
+			&& "DEPUTYOWNER".equals(roleName.replaceAll("[^A-Za-z0-9]", "").toUpperCase(java.util.Locale.ROOT));
 	}
 
 	private static String maxMessageId(String current, String candidate)
@@ -2292,6 +2848,10 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 						{
 							panel.setStatus("Acesso staff necessário para publicar");
 						}
+						else if (response.code() == 403 && body.contains("broadcast_role_required"))
+						{
+							panel.setStatus("Broadcast indisponível para este cargo");
+						}
 						else if (response.code() == 401 && body.contains("unauthorized"))
 						{
 							panel.setStatus("Falha de autenticação WOM. Clique em Verificar agora e tente de novo");
@@ -2351,6 +2911,11 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		{
 			return;
 		}
+		if (!hasStaffAccessKey())
+		{
+			if (panel != null) panel.setSentMessagesStatus("Configure a chave da staff");
+			return;
+		}
 		getJson("admin/sent-messages", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
@@ -2365,7 +2930,9 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 				{
 					if (!response.isSuccessful() || response.body() == null)
 					{
-						if (panel != null) panel.setSentMessagesStatus("Erro " + response.code());
+						if (panel != null) panel.setSentMessagesStatus(response.code() == 403
+							? "Verifique a chave da staff"
+							: "Erro " + response.code());
 						return;
 					}
 					ClanMessagesPanel.StaffSentMessage[] sent = gson.fromJson(
@@ -2602,7 +3169,7 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		{
 			if (panel != null)
 			{
-				panel.setStatus("Ative Conectar ao clan nas configuracoes");
+				panel.showConnectionRequired();
 			}
 			return;
 		}
@@ -2639,13 +3206,14 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 							allowed.add("OWNER"); allowed.add("DEPUTYOWNER"); allowed.add("MODERATOR"); allowed.add("ADMINISTRATOR");
 							if (allowed.contains(norm)) staff = true;					}
 					isStaff = staff;
+					isDeputyOwner = isDeputyOwnerRole(roleName);
+					canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
 					switchMessageCursorAccount(rsn);
 					authenticatedPlayerName = rsn;
 					configurePolling();
 					fetchRankRequestStatus();
-					if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); }
-					if (panel != null) panel.setStatus(staff ? "Acesso staff confirmado (WOM)" : "Acesso liberado (membro WOM)");
-					if (staff)
+					if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); panel.setDeputyOwner(isDeputyOwner); panel.setBroadcastAllowed(canPublishBroadcast); panel.setAuthenticatedPlayer(rsn); }
+					if (staff && hasStaffAccessKey())
 					{
 						fetchRankRequests();
 						fetchSentMessages();
@@ -2657,6 +3225,8 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 				{
 					authenticatedPlayerName = "";
 					isStaff = false;
+					isDeputyOwner = false;
+					canPublishBroadcast = false;
 					if (panel != null) { panel.setStatus("Não é membro do clã (WOM)"); panel.setAccessMessage("Membro não identificado. Este plugin é exclusivo para membros do Live On."); panel.startVerifyCooldown(VERIFY_COOLDOWN_SECONDS); }
 					return;
 				}
@@ -2741,13 +3311,14 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 									if (allowed.contains(norm)) staff = true;
 								}
 								isStaff = staff;
+								isDeputyOwner = isDeputyOwnerRole(roleName);
+								canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
 								switchMessageCursorAccount(rsn);
 								authenticatedPlayerName = rsn;
 								configurePolling();
 								fetchRankRequestStatus();
-								if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); }
-								if (panel != null) panel.setStatus(staff ? "Acesso staff confirmado (WOM)" : "Acesso liberado (membro WOM)");
-								if (staff)
+								if (panel != null) { panel.setAccessMessage(""); panel.setAuthenticated(true, staff); panel.setDeputyOwner(isDeputyOwner); panel.setBroadcastAllowed(canPublishBroadcast); panel.setAuthenticatedPlayer(rsn); }
+								if (staff && hasStaffAccessKey())
 								{
 									fetchRankRequests();
 									fetchSentMessages();
@@ -2757,6 +3328,8 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 							{
 								authenticatedPlayerName = "";
 								isStaff = false;
+								isDeputyOwner = false;
+								canPublishBroadcast = false;
 								if (panel != null) panel.setAuthenticated(false, false);
 								if (panel != null) { panel.setStatus("Não é membro do clã (WOM)"); panel.setAccessMessage("Membro não identificado. Este plugin é exclusivo para membros do Live On."); }
 							}
@@ -2816,12 +3389,26 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		return builder;
 	}
 
+	private boolean hasStaffAccessKey()
+	{
+		return config.staffAccessKey() != null && !config.staffAccessKey().trim().isEmpty();
+	}
+
 	private void saveStaffAccessKey(String staffAccessKey)
 	{
 		configManager.setConfiguration(
 			"live-on-clan-messages",
 			"staffAccessKey",
 			staffAccessKey == null ? "" : staffAccessKey.trim());
+		if (isStaff && staffAccessKey != null && !staffAccessKey.trim().isEmpty())
+		{
+			configurePolling();
+			fetchLives();
+			fetchRankRequests();
+			fetchSentMessages();
+			fetchMvpMembers();
+			fetchClanTags();
+		}
 	}
 
 	private synchronized void switchMessageCursorAccount(String playerName)
@@ -2865,6 +3452,19 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		return HttpUrl.parse(configuredUrl);
 	}
 
+	private void rebuildNavigationButton()
+	{
+		if (panel == null) return;
+		if (navigationButton != null) clientToolbar.removeNavigation(navigationButton);
+		navigationButton = NavigationButton.builder()
+			.tooltip("Live on clan")
+			.icon(createIcon())
+			.panel(panel)
+			.priority(config.sidebarIconPriority())
+			.build();
+		clientToolbar.addNavigation(navigationButton);
+	}
+
 	private BufferedImage createIcon()
 	{
 		BufferedImage icon = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
@@ -2903,6 +3503,11 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			log.debug("Not staff, skipping rank requests fetch");
 			return;
 		}
+		if (!hasStaffAccessKey())
+		{
+			if (panel != null) panel.setRankRequestsStatus("Configure a chave da staff");
+			return;
+		}
 		getJson("admin/rank-requests", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
@@ -2917,6 +3522,10 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 					if (!response.isSuccessful() || response.body() == null)
 					{
 						log.debug("Failed to fetch rank requests: " + response.code());
+						if (response.code() == 403 && panel != null)
+						{
+							panel.setRankRequestsStatus("Verifique a chave da staff");
+						}
 						return;
 					}
 					String jsonBody = response.body().string();
@@ -2951,6 +3560,10 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 
 	private void fetchRankRequestActivity()
 	{
+		if (!isStaff || !hasStaffAccessKey())
+		{
+			return;
+		}
 		getJson("admin/rank-request-activity", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
@@ -2965,6 +3578,10 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 					if (!response.isSuccessful() || response.body() == null)
 					{
 						log.debug("Failed to fetch rank request activity: {}", response.code());
+						if (response.code() == 403 && panel != null)
+						{
+							panel.setRankRequestsStatus("Verifique a chave da staff");
+						}
 						return;
 					}
 					RankRequestsPanel.RankRequestActivity[] activities = gson.fromJson(

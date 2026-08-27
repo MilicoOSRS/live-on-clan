@@ -45,7 +45,7 @@ final class ClanLiveBadgeDecorator
 		String rawText = widget.getText();
 		if (rawText != null && !rawText.isEmpty())
 		{
-			String baseText = removeOwnMarkup(rawText);
+			String baseText = plugin.removeKnownClanTagMarkup(removeOwnMarkup(rawText));
 			String displayedText = Text.removeTags(baseText).trim();
 			String playerName = enabled ? plugin.decoratedPlayerNameIn(displayedText) : null;
 			String decoratedText = baseText;
@@ -53,6 +53,7 @@ final class ClanLiveBadgeDecorator
 			{
 				if (plugin.isPlayerMvp(playerName)) decoratedText += MVP_MARKUP;
 				if (plugin.isPlayerLive(playerName)) decoratedText += LIVE_MARKUP;
+				decoratedText += plugin.clanTagBadges(playerName);
 			}
 			if (!rawText.equals(decoratedText)) widget.setText(decoratedText);
 		}

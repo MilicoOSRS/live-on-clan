@@ -3,6 +3,7 @@ package com.liveon;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.Range;
 
 @ConfigGroup("live-on-clan-messages")
 public interface ClanMessagesConfig extends Config
@@ -69,6 +70,18 @@ public interface ClanMessagesConfig extends Config
 	default boolean discordDropsEnabled()
 	{
 		return false;
+	}
+
+	@Range(min = -20, max = 20)
+	@ConfigItem(
+		keyName = "sidebarIconPriority",
+		name = "Posição do ícone",
+		description = "Use as setas para mover o ícone do plugin na barra lateral",
+		position = 5
+	)
+	default int sidebarIconPriority()
+	{
+		return 0;
 	}
 
 	@ConfigItem(
