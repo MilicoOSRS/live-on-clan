@@ -748,6 +748,7 @@ final class ClanMessagesPanel extends PluginPanel
 			nextChecks, overviewChecks, advice);
 	}
 	void clearRankDetails() { ranksTab.clearDetails(); }
+	void clearRanksStatus() { ranksTab.setStatus(" "); }
 	void resetRanks() { ranksTab.reset(); }
 	void setRankRequestState(boolean pending, int cooldownSeconds)
 	{
