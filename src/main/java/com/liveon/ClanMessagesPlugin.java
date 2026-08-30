@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Executors;
@@ -93,7 +94,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final Pattern RANK_REQUEST_MESSAGE_PATTERN = Pattern.compile("(?<player>.+) solicitou um rank: (?<rank>.+)");
 	private static final Pattern PROMOTION_MESSAGE_PATTERN = Pattern.compile("(?:Promo\u00E7\u00E3o: )?(?<player>.+?) foi promovido para (?<rank>.+)!");
-	private static final Pattern URL_PATTERN = Pattern.compile("(?i)\\bhttps?://[^\\s<>]+");
+	private static final Pattern URL_PATTERN = Pattern.compile("(?i)\\b(?:https?://|twitch\\.tv/)[^\\s<>]+");
 	private static final Pattern PET_TRIGGER_PATTERN = Pattern.compile(
 		"You (?:have a funny feeling like you|feel something weird sneaking).*", Pattern.CASE_INSENSITIVE);
 	private static final Pattern PET_CLAN_PATTERN = Pattern.compile(
@@ -105,11 +106,26 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern VALUABLE_DROP_PATTERN = Pattern.compile(
 		"(?:Valuable drop|Untradeable drop):\\s*(?:(\\d+)\\s*x\\s*)?(.+?)\\s*\\(([0-9,]+)\\s+coins?\\)\\s*\\.?$",
 		Pattern.CASE_INSENSITIVE);
+	private static final String PB_TEAM_SIZE = "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)";
+	private static final Pattern PB_KILLCOUNT_PATTERN = Pattern.compile(
+		"Your (?<pre>completion count for |subdued |completed )?(?<boss>.+?) (?<post>(?:(?:kill|harvest|lap|completion|success|Total Ticket) )?(?:count )?)is: ?(?<kc>[0-9,]+)",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern PB_NEW_TIME_PATTERN = Pattern.compile(
+		"(?i)(?:(?:Fight |Lap |Challenge |Corrupted challenge )?duration:|Subdued in|(?<!total )completion time:).*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)</col> \\(new personal best\\)");
+	private static final Pattern PB_RAID_PATTERN = Pattern.compile(
+		"Team size:.*?" + PB_TEAM_SIZE + ".*?Duration:.*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)</col> \\(new personal best\\)",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern ADVENTURE_LOG_TITLE_PATTERN = Pattern.compile("The Exploits of (.+)");
+	private static final Pattern ADVENTURE_LOG_PB_PATTERN = Pattern.compile(
+		"^Fastest (?<kind>kill|run|Room time|Overall time)"
+			+ "(?:\\s*-\\s*\\(Team size:\\s*(?<details>[^)]+)\\))?\\s*:\\s*"
+			+ "(?<time>[0-9:]+(?:\\.[0-9]+)?)?$", Pattern.CASE_INSENSITIVE);
+	private static final Pattern ADVENTURE_LOG_TIME_ONLY_PATTERN = Pattern.compile(
+		"^(?<time>[0-9:]+(?:\\.[0-9]+)?)$");
 	private static final int PET_DETAILS_WAIT_TICKS = 5;
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
-	private static final long RANK_NOTIFICATION_COOLDOWN_MILLIS = 24L * 60L * 60L * 1000L;
 	// Drop exceptions modelled after Dink's loot filters. A trailing '*' matches
 	// item variants. Collection-log messages provide a fallback when RuneLite
 	// does not emit a normal loot event for one of these items.
@@ -175,13 +191,21 @@ public class ClanMessagesPlugin extends Plugin
 	private static final class CacheEntry { final boolean member; final String role; final long expiresAtMillis; CacheEntry(boolean m, String r, long e) { member=m; role=r; expiresAtMillis=e; } }
 	private ScheduledFuture<?> pollingTask;
 	private String lastMessageId = "";
+	private volatile boolean messageSessionInitialized = false;
+	private final AtomicLong messageSessionGeneration = new AtomicLong();
+	private final AtomicLong connectionSessionGeneration = new AtomicLong();
 	private String messageCursorAccount = "";
 	private final java.util.Map<String, String> messageCursorByAccount = new java.util.concurrent.ConcurrentHashMap<>();
 	private String lastClearMarker = "";
 	private final AtomicBoolean messageFetchInFlight = new AtomicBoolean(false);
+	private final AtomicBoolean pbCategoriesFetchInFlight = new AtomicBoolean(false);
+	private final AtomicLong pbRankingRequestGeneration = new AtomicLong();
+	private final AtomicBoolean rankRequestsFetchInFlight = new AtomicBoolean(false);
+	private volatile boolean rankRequestsSessionInitialized = false;
 	private final java.util.Set<String> locallyDisplayedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private final java.util.Set<String> sessionRankNotifications = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private boolean isStaff = false;
 	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
@@ -201,6 +225,7 @@ public class ClanMessagesPlugin extends Plugin
 	private String questAccount = "";
 	private boolean rankSyncCompleted;
 	private boolean rankWidgetRefreshPending;
+	private int lastCombatAchievementRankRefreshTick = -1000;
 	private final java.util.Set<String> rankBankItems = new java.util.HashSet<>();
 	private final java.util.Set<Integer> rankBankItemIds = new java.util.HashSet<>();
 	private String rankBankAccount = "";
@@ -208,6 +233,18 @@ public class ClanMessagesPlugin extends Plugin
 	private int lastObservedRankTotalLevel = -1;
 	private volatile boolean rankRequestStatusKnown;
 	private volatile boolean rankRequestPending;
+	private boolean adventureLogMenuLoaded;
+	private boolean adventureLogCountersLoaded;
+	private String adventureLogOwner;
+	private String pendingPbBoss;
+	private double pendingPbSeconds = -1;
+	private int pendingPbTeamSize;
+	private int pendingPbTick = -1;
+	private final java.util.Set<String> submittedPbSignatures = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private int combatAchievementPbScanTicks;
+	private String visibleCombatAchievementPage = "";
+	private int bossStatisticsBoardScanTicks;
+	private final java.util.LinkedHashSet<Integer> bossStatisticsBoardGroupIds = new java.util.LinkedHashSet<>();
 	private final java.util.Map<String, PendingAllowlistedDrop> pendingAllowlistedDrops = new java.util.HashMap<>();
 	private final java.util.Map<String, Integer> recentAllowlistedLootTicks = new java.util.HashMap<>();
 
@@ -240,7 +277,7 @@ public class ClanMessagesPlugin extends Plugin
 		executor = Executors.newSingleThreadScheduledExecutor();
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
-		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, config.staffAccessKey(), this::saveStaffAccessKey);
+		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey);
 		panel.clearRankDetails();
 		if (config.enabled())
 		{
@@ -295,6 +332,8 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		verifiedAccount = "";
 		authenticatedPlayerName = "";
+		submittedPbSignatures.clear();
+		visibleCombatAchievementPage = "";
 		isStaff = false;
 		isDeputyOwner = false;
 		canPublishBroadcast = false;
@@ -414,8 +453,9 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			url = url.substring(0, url.length() - 1);
 		}
-		HttpUrl parsed = HttpUrl.parse(url);
-		return parsed != null && ("http".equals(parsed.scheme()) || "https".equals(parsed.scheme())) ? url : null;
+		String navigable = url.regionMatches(true, 0, "twitch.tv/", 0, 10) ? "https://" + url : url;
+		HttpUrl parsed = HttpUrl.parse(navigable);
+		return parsed != null && ("http".equals(parsed.scheme()) || "https".equals(parsed.scheme())) ? navigable : null;
 	}
 
 	@Subscribe
@@ -430,6 +470,7 @@ public class ClanMessagesPlugin extends Plugin
 		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
 		if (event.getType() == ChatMessageType.GAMEMESSAGE)
 		{
+			capturePersonalBest(event.getMessage(), message);
 			PendingAllowlistedDrop valuableDrop = allowlistedValuableDrop(message);
 			if (valuableDrop != null)
 			{
@@ -877,6 +918,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void refreshRanksAutomatically()
 	{
+		rankSyncCompleted = true;
 		clientThread.invoke(() -> refreshRanksOnClientThread(false));
 	}
 
@@ -914,7 +956,8 @@ public class ClanMessagesPlugin extends Plugin
 			collectItemNames(event.getItemContainer(), rankBankItems);
 			collectItemIds(event.getItemContainer(), rankBankItemIds);
 			rankBankLoaded = true;
-			refreshRanksAutomatically();
+			rankSyncCompleted = true;
+			clientThread.invoke(() -> refreshRanksOnClientThread(true));
 		}
 		else if (event.getContainerId() == InventoryID.INV
 			|| event.getContainerId() == InventoryID.WORN)
@@ -953,6 +996,25 @@ public class ClanMessagesPlugin extends Plugin
 	public void onWidgetLoaded(WidgetLoaded event)
 	{
 		int groupId = event.getGroupId();
+		// Physical scoreboards do not share one stable interface group. Restrict
+		// the short inspection window to the group that actually loaded instead
+		// of collecting text from every visible game interface.
+		bossStatisticsBoardGroupIds.add(groupId);
+		while (bossStatisticsBoardGroupIds.size() > 8)
+		{
+			java.util.Iterator<Integer> oldest = bossStatisticsBoardGroupIds.iterator();
+			oldest.next();
+			oldest.remove();
+		}
+		bossStatisticsBoardScanTicks = 4;
+		if (groupId == InterfaceID.MENU || groupId == InterfaceID.MENU_NEW)
+		{
+			adventureLogMenuLoaded = true;
+		}
+		else if (groupId == InterfaceID.JOURNALSCROLL)
+		{
+			adventureLogCountersLoaded = true;
+		}
 		if (groupId == InterfaceID.ACCOUNT || groupId == InterfaceID.ACCOUNT_SUMMARY_SIDEPANEL
 			|| groupId == InterfaceID.QUESTLIST)
 		{
@@ -961,14 +1023,38 @@ public class ClanMessagesPlugin extends Plugin
 			lastQuestPoints = -1;
 			lastMaximumQuestPoints = -1;
 		}
-		if (groupId == InterfaceID.CA_OVERVIEW || groupId == InterfaceID.CA_TASKS
-			|| groupId == InterfaceID.CA_REWARDS || groupId == InterfaceID.CA_BOSSES
-			|| groupId == InterfaceID.CA_BOSS
-			|| groupId == InterfaceID.ACCOUNT || groupId == InterfaceID.ACCOUNT_SUMMARY_SIDEPANEL
+		boolean combatAchievementsGroup = groupId == InterfaceID.CA_OVERVIEW
+			|| groupId == InterfaceID.CA_TASKS || groupId == InterfaceID.CA_REWARDS
+			|| groupId == InterfaceID.CA_BOSSES || groupId == InterfaceID.CA_BOSS;
+		if (groupId == InterfaceID.ACCOUNT || groupId == InterfaceID.ACCOUNT_SUMMARY_SIDEPANEL
 			|| groupId == InterfaceID.QUESTLIST)
 		{
 			scheduleRankWidgetRefresh();
 		}
+		else if (combatAchievementsGroup)
+		{
+			scheduleSingleRankRefresh();
+		}
+		if (combatAchievementsGroup)
+		{
+			// The boss name and statistics are populated asynchronously. Read only
+			// their official widgets for a short period after the CA interface loads.
+			combatAchievementPbScanTicks = 6;
+		}
+	}
+
+	/** CA points come from a game varbit, so one deferred refresh is enough. */
+	private void scheduleSingleRankRefresh()
+	{
+		int tick = client.getTickCount();
+		if (rankWidgetRefreshPending || tick - lastCombatAchievementRankRefreshTick < 3) return;
+		lastCombatAchievementRankRefreshTick = tick;
+		rankWidgetRefreshPending = true;
+		clientThread.invokeLater(() ->
+		{
+			rankWidgetRefreshPending = false;
+			refreshRanksOnClientThread(false);
+		});
 	}
 
 	/**
@@ -1142,17 +1228,10 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 
-		String rankKey = "rankAvailableNotification.rank.v2." + accountKey;
-		String timeKey = "rankAvailableNotification.time.v2." + accountKey;
-		int notifiedIndex = regularRankIndex(
-			configManager.getConfiguration("live-on-clan-messages", rankKey));
-		long notifiedAt = storedLong(timeKey, 0L);
-		long now = System.currentTimeMillis();
-		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex, notifiedIndex,
-			notifiedAt, now, rankRequestStatusKnown && rankRequestPending)) return;
-
-		configManager.setConfiguration("live-on-clan-messages", rankKey, eligibleRank);
-		configManager.setConfiguration("live-on-clan-messages", timeKey, now);
+		String sessionKey = accountKey + "|" + eligibleRank.toLowerCase(java.util.Locale.ROOT);
+		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex,
+			sessionRankNotifications.contains(sessionKey), rankRequestStatusKnown && rankRequestPending)) return;
+		sessionRankNotifications.add(sessionKey);
 		String message = rankNotificationMessage(eligibleRank);
 		ChatMessageBuilder builder = new ChatMessageBuilder()
 			.append(Color.GREEN, "[Live On] ")
@@ -1171,13 +1250,11 @@ public class ClanMessagesPlugin extends Plugin
 		return "[Live On] Promoção de rank disponível: " + rank + "! Solicite pelo plugin do clã.";
 	}
 
-	static boolean shouldNotifyAvailableRank(int currentIndex, int eligibleIndex, int notifiedIndex,
-		long notifiedAt, long now, boolean requestPending)
+	static boolean shouldNotifyAvailableRank(int currentIndex, int eligibleIndex,
+		boolean notifiedThisSession, boolean requestPending)
 	{
 		if (requestPending || currentIndex < 0 || eligibleIndex <= currentIndex) return false;
-		if (eligibleIndex > notifiedIndex) return true;
-		return eligibleIndex == notifiedIndex
-			&& (notifiedAt <= 0L || now - notifiedAt >= RANK_NOTIFICATION_COOLDOWN_MILLIS);
+		return !notifiedThisSession;
 	}
 
 	private Icon clanRankIconFor(String displayRank)
@@ -1543,14 +1620,10 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if (widget == null) return;
 		if (widget.getText() != null && !widget.getText().trim().isEmpty()) texts.add(widget.getText().trim());
+		// getChildren() already exposes the widget's complete child collection.
+		// Walking each specialized child array as well repeats the same subtrees.
 		Widget[] children = widget.getChildren();
 		if (children != null) for (Widget child : children) collectWidgetTexts(child, texts);
-		Widget[] dynamicChildren = widget.getDynamicChildren();
-		if (dynamicChildren != null) for (Widget child : dynamicChildren) collectWidgetTexts(child, texts);
-		Widget[] staticChildren = widget.getStaticChildren();
-		if (staticChildren != null) for (Widget child : staticChildren) collectWidgetTexts(child, texts);
-		Widget[] nestedChildren = widget.getNestedChildren();
-		if (nestedChildren != null) for (Widget child : nestedChildren) collectWidgetTexts(child, texts);
 	}
 
 	private int readQuestPoints()
@@ -2288,6 +2361,17 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		processAdventureLog();
+		armCombatAchievementPbScanForVisiblePage();
+		processCombatAchievementBossPb();
+		processBossStatisticsBoardPb();
+		if (pendingPbTick >= 0 && client.getTickCount() - pendingPbTick > 5)
+		{
+			pendingPbBoss = null;
+			pendingPbSeconds = -1;
+			pendingPbTeamSize = 0;
+			pendingPbTick = -1;
+		}
 		if (pendingPet && (pendingPetMilestone != null || ++pendingPetTicks > PET_DETAILS_WAIT_TICKS))
 		{
 			String playerName = client.getLocalPlayer() == null ? "Jogador" : client.getLocalPlayer().getName();
@@ -2316,6 +2400,291 @@ public class ClanMessagesPlugin extends Plugin
 		}
 	}
 
+	private void processBossStatisticsBoardPb()
+	{
+		if (bossStatisticsBoardScanTicks <= 0 || (client.getTickCount() & 1) != 0) return;
+		if (combatAchievementPbScanTicks > 0) return;
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()) return;
+		bossStatisticsBoardScanTicks--;
+		List<String> texts = new ArrayList<>();
+		List<Map<String, Object>> parsedRecords = parseOfficialBossScoreboards();
+		Widget[] roots = client.getWidgetRoots();
+		if (parsedRecords.isEmpty() && roots != null && !bossStatisticsBoardGroupIds.isEmpty())
+		{
+			java.util.Set<Widget> visited = java.util.Collections.newSetFromMap(
+				new java.util.IdentityHashMap<Widget, Boolean>());
+			for (Widget root : roots)
+			{
+				collectVisibleWidgetTextsForGroups(root, bossStatisticsBoardGroupIds, texts, visited);
+			}
+		}
+		if (parsedRecords.isEmpty()) parsedRecords = parseBossStatisticsBoardPbs(texts);
+		if (parsedRecords.isEmpty())
+		{
+			if (bossStatisticsBoardScanTicks <= 0)
+			{
+				bossStatisticsBoardGroupIds.clear();
+			}
+			return;
+		}
+		bossStatisticsBoardScanTicks = 0;
+		bossStatisticsBoardGroupIds.clear();
+		for (Map<String, Object> parsed : parsedRecords)
+		{
+			String boss = (String) parsed.get("boss");
+			double seconds = (Double) parsed.get("seconds");
+			String detectedMode = (String) parsed.get("mode");
+			Map<String, Object> payload = pbPayload(
+				boss + (detectedMode == null || detectedMode.isEmpty() ? "" : " " + detectedMode), 0, seconds);
+			String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
+				+ payload.get("mode") + "\n" + seconds;
+			if (!submittedPbSignatures.add(signature)) continue;
+			submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds, signature);
+		}
+	}
+
+	static Map<String, Object> parseBossStatisticsBoardPb(List<String> widgetTexts)
+	{
+		List<Map<String, Object>> records = parseBossStatisticsBoardPbs(widgetTexts);
+		return records.isEmpty() ? null : records.get(0);
+	}
+
+	static List<Map<String, Object>> parseBossStatisticsBoardPbs(List<String> widgetTexts)
+	{
+		List<Map<String, Object>> result = new ArrayList<>();
+		if (widgetTexts == null) return result;
+		String boss = null;
+		List<String> normalizedTexts = new ArrayList<>();
+		for (String raw : widgetTexts)
+		{
+			String withBreaks = (raw == null ? "" : raw).replaceAll("(?i)<br\\s*/?>", " ");
+			String text = Text.removeTags(withBreaks).replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+			normalizedTexts.add(text);
+			Matcher title = Pattern.compile("(?i)^(.+?)\\s+Statistics$").matcher(text);
+			if (title.find()) boss = title.group(1).trim();
+		}
+		if (boss == null || boss.isEmpty()) return result;
+		for (String text : normalizedTexts)
+		{
+			Matcher personalBest = Pattern.compile(
+				"(?i)((?:Awakened\\s+)?Personal Best(?:\\s+Awakened)? Time"
+					+ "(?:\\s*\\(\\s*(?:Awakened|Normal)\\s*\\)|\\s*-\\s*(?:Awakened|Normal))?)"
+					+ "\\s*:?\\s*([0-9]+(?::[0-9]+){0,2}(?:\\.[0-9]+)?)").matcher(text);
+			while (personalBest.find())
+			{
+				double seconds;
+				try { seconds = parsePbTime(personalBest.group(2)); }
+				catch (NumberFormatException ignored) { continue; }
+				if (seconds <= 0) continue;
+				String label = personalBest.group(1);
+				String mode = label.toLowerCase(java.util.Locale.ROOT).contains("awakened")
+					? "Awakened" : "";
+				Map<String, Object> record = new LinkedHashMap<>();
+				record.put("boss", boss);
+				record.put("mode", mode);
+				record.put("seconds", seconds);
+				result.add(record);
+			}
+		}
+		return result;
+	}
+
+	private void processCombatAchievementBossPb()
+	{
+		if (combatAchievementPbScanTicks <= 0 || (client.getTickCount() & 1) != 0) return;
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()) return;
+		combatAchievementPbScanTicks--;
+		Widget bossName = client.getWidget(InterfaceID.CaBoss.BOSS_NAME);
+		Widget bossStats = client.getWidget(InterfaceID.CaBoss.CA_BOSS_STATS);
+		if (!isVisibleWidget(bossName) || !isVisibleWidget(bossStats)) return;
+		List<String> bossTexts = new ArrayList<>();
+		collectVisibleWidgetTexts(bossName, bossTexts);
+		List<String> statsTexts = new ArrayList<>();
+		collectVisibleWidgetTexts(bossStats, statsTexts);
+		Map<String, Object> parsed = parseCombatAchievementBossWidgets(firstWidgetText(bossTexts), statsTexts);
+		if (parsed == null) return;
+		combatAchievementPbScanTicks = 0;
+		String boss = (String) parsed.get("boss");
+		double seconds = (Double) parsed.get("seconds");
+		Map<String, Object> payload = pbPayload(boss, 0, seconds);
+		String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
+			+ payload.get("mode") + "\n" + seconds;
+		if (!submittedPbSignatures.add(signature)) return;
+		submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds, signature);
+	}
+
+	private void armCombatAchievementPbScanForVisiblePage()
+	{
+		if ((client.getTickCount() & 1) != 0) return;
+		String page = visibleCombatAchievementPageTitle();
+		if (page.isEmpty())
+		{
+			// A newly loaded CA page can expose its group before the named widget is
+			// populated. Preserve the short retry window until its text is available.
+			if (combatAchievementPbScanTicks <= 0) visibleCombatAchievementPage = "";
+			return;
+		}
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()) return;
+		if (!page.equalsIgnoreCase(visibleCombatAchievementPage))
+		{
+			visibleCombatAchievementPage = page;
+			combatAchievementPbScanTicks = 6;
+		}
+	}
+
+	private String visibleCombatAchievementPageTitle()
+	{
+		Widget bossName = client.getWidget(InterfaceID.CaBoss.BOSS_NAME);
+		if (!isVisibleWidget(bossName)) return "";
+		List<String> texts = new ArrayList<>();
+		collectVisibleWidgetTexts(bossName, texts);
+		return firstWidgetText(texts);
+	}
+
+	private static boolean isVisibleWidget(Widget widget)
+	{
+		return widget != null && !widget.isHidden();
+	}
+
+	private static String firstWidgetText(List<String> texts)
+	{
+		if (texts == null) return "";
+		for (String raw : texts)
+		{
+			String text = Text.removeTags(raw == null ? "" : raw).replace('\u00a0', ' ').trim();
+			if (!text.isEmpty()) return text;
+		}
+		return "";
+	}
+
+	private void collectVisibleWidgetTexts(Widget widget, List<String> texts)
+	{
+		collectVisibleWidgetTexts(widget, texts,
+			java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Widget, Boolean>()));
+	}
+
+	private void collectVisibleWidgetTexts(Widget widget, List<String> texts, java.util.Set<Widget> visited)
+	{
+		if (widget == null || widget.isHidden() || !visited.add(widget)) return;
+		if (widget.getText() != null && !widget.getText().trim().isEmpty()) texts.add(widget.getText().trim());
+		collectVisibleWidgetTexts(widget.getChildren(), texts, visited);
+		collectVisibleWidgetTexts(widget.getDynamicChildren(), texts, visited);
+		collectVisibleWidgetTexts(widget.getStaticChildren(), texts, visited);
+		collectVisibleWidgetTexts(widget.getNestedChildren(), texts, visited);
+	}
+
+	private void collectVisibleWidgetTexts(Widget[] widgets, List<String> texts, java.util.Set<Widget> visited)
+	{
+		if (widgets == null) return;
+		for (Widget child : widgets) collectVisibleWidgetTexts(child, texts, visited);
+	}
+
+	private void collectVisibleWidgetTextsForGroups(Widget widget, java.util.Set<Integer> groupIds, List<String> texts,
+		java.util.Set<Widget> visited)
+	{
+		if (widget == null || widget.isHidden() || !visited.add(widget)) return;
+		if (groupIds.contains(widget.getId() >>> 16))
+		{
+			collectVisibleWidgetTexts(widget, texts);
+			return;
+		}
+		collectVisibleWidgetTextsForGroups(widget.getChildren(), groupIds, texts, visited);
+		collectVisibleWidgetTextsForGroups(widget.getDynamicChildren(), groupIds, texts, visited);
+		collectVisibleWidgetTextsForGroups(widget.getStaticChildren(), groupIds, texts, visited);
+		collectVisibleWidgetTextsForGroups(widget.getNestedChildren(), groupIds, texts, visited);
+	}
+
+	private void collectVisibleWidgetTextsForGroups(Widget[] widgets, java.util.Set<Integer> groupIds, List<String> texts,
+		java.util.Set<Widget> visited)
+	{
+		if (widgets == null) return;
+		for (Widget child : widgets) collectVisibleWidgetTextsForGroups(child, groupIds, texts, visited);
+	}
+
+	private List<Map<String, Object>> parseOfficialBossScoreboards()
+	{
+		List<Map<String, Object>> records = new ArrayList<>();
+		appendOfficialScoreboard(records, InterfaceID.LeviathanScoreboard.TITLE_TEXT,
+			InterfaceID.LeviathanScoreboard.PBT, InterfaceID.LeviathanScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.WhispererScoreboard.TITLE_TEXT,
+			InterfaceID.WhispererScoreboard.PBT, InterfaceID.WhispererScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.VardorvisScoreboard.TITLE_TEXT,
+			InterfaceID.VardorvisScoreboard.PBT, InterfaceID.VardorvisScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.DukeSucellusScoreboard.TITLE_TEXT,
+			InterfaceID.DukeSucellusScoreboard.PBT, InterfaceID.DukeSucellusScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.MaggotKingScoreboard.TITLE_TEXT,
+			InterfaceID.MaggotKingScoreboard.PBT, InterfaceID.MaggotKingScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.AmoxliatlScoreboard.TITLE_TEXT,
+			InterfaceID.AmoxliatlScoreboard.PBT, InterfaceID.AmoxliatlScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.AraxxorScoreboard.TITLE_TEXT,
+			InterfaceID.AraxxorScoreboard.PBT, InterfaceID.AraxxorScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.HueyScoreboard.TITLE_TEXT,
+			InterfaceID.HueyScoreboard.PBT, InterfaceID.HueyScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.MuspahScoreboard.TITLE_TEXT,
+			InterfaceID.MuspahScoreboard.PBT, InterfaceID.MuspahScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.NexScoreboard.TITLE_TEXT,
+			InterfaceID.NexScoreboard.PBT, InterfaceID.NexScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.RoyalTitansScoreboard.TITLE_TEXT,
+			InterfaceID.RoyalTitansScoreboard.PBT, InterfaceID.RoyalTitansScoreboard.PBT_CONTENT);
+		appendOfficialScoreboard(records, InterfaceID.YamaScoreboard.TITLE_TEXT,
+			InterfaceID.YamaScoreboard.PBT, InterfaceID.YamaScoreboard.PBT_CONTENT);
+		return records;
+	}
+
+	private void appendOfficialScoreboard(List<Map<String, Object>> records, int titleId, int labelId, int valueId)
+	{
+		Widget title = client.getWidget(titleId);
+		Widget label = client.getWidget(labelId);
+		Widget value = client.getWidget(valueId);
+		if (!isVisibleWidget(title) || !isVisibleWidget(label) || !isVisibleWidget(value)) return;
+		List<String> titleTexts = new ArrayList<>();
+		List<String> pbTexts = new ArrayList<>();
+		collectVisibleWidgetTexts(title, titleTexts);
+		collectVisibleWidgetTexts(label, pbTexts);
+		collectVisibleWidgetTexts(value, pbTexts);
+		String titleText = String.join(" ", titleTexts);
+		String pbText = String.join(" ", pbTexts);
+		if (titleText.trim().isEmpty() || pbText.trim().isEmpty()) return;
+		records.addAll(parseBossStatisticsBoardPbs(java.util.Arrays.asList(titleText, pbText)));
+	}
+
+	static Map<String, Object> parseCombatAchievementBossPb(List<String> widgetTexts)
+	{
+		if (widgetTexts == null) return null;
+		String boss = null;
+		Double seconds = null;
+		for (String raw : widgetTexts)
+		{
+			String text = Text.removeTags(raw == null ? "" : raw).replace('\u00a0', ' ').trim();
+			Matcher title = Pattern.compile("(?i)^Combat Achievements?\\s*[-–—]\\s*(.+)$").matcher(text);
+			if (title.find()) boss = title.group(1).trim();
+			Matcher personalBest = Pattern.compile("(?i)Personal Best\\s*:\\s*([0-9]+(?::[0-9]+){0,2}(?:\\.[0-9]+)?)").matcher(text);
+			if (personalBest.find())
+			{
+				try { seconds = parsePbTime(personalBest.group(1)); }
+				catch (NumberFormatException ignored) { return null; }
+			}
+		}
+		if (boss == null || boss.isEmpty() || seconds == null || seconds <= 0) return null;
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("boss", boss);
+		result.put("seconds", seconds);
+		return result;
+	}
+
+	static Map<String, Object> parseCombatAchievementBossWidgets(String bossWidgetText, List<String> statsTexts)
+	{
+		String boss = Text.removeTags(bossWidgetText == null ? "" : bossWidgetText)
+			.replace('\u00a0', ' ').trim();
+		Matcher title = Pattern.compile("(?i)^Combat Achievements?\\s*[-–—]\\s*(.+)$").matcher(boss);
+		if (title.find()) boss = title.group(1).trim();
+		if (boss.isEmpty()) return null;
+		List<String> combined = new ArrayList<>();
+		combined.add("Combat Achievements - " + boss);
+		if (statsTexts != null) combined.addAll(statsTexts);
+		return parseCombatAchievementBossPb(combined);
+	}
+
 	private void resetPendingPet()
 	{
 		pendingPet = false;
@@ -2326,6 +2695,263 @@ public class ClanMessagesPlugin extends Plugin
 		pendingPetBackpack = false;
 		pendingPetPreviouslyOwned = null;
 		pendingPetTicks = 0;
+	}
+
+	private void capturePersonalBest(String rawMessage, String plainMessage)
+	{
+		Matcher kill = PB_KILLCOUNT_PATTERN.matcher(plainMessage);
+		if (kill.find())
+		{
+			String boss = kill.group("boss").trim().replace(":", "");
+			if (pendingPbSeconds > 0 && pendingPbTick >= 0 && client.getTickCount() - pendingPbTick <= 5)
+			{
+				submitCategorizedPb(boss, pendingPbTeamSize, pendingPbSeconds);
+				pendingPbSeconds = -1;
+				pendingPbTeamSize = 0;
+				pendingPbTick = -1;
+			}
+			else
+			{
+				pendingPbBoss = boss;
+				pendingPbTick = client.getTickCount();
+			}
+			return;
+		}
+
+		Matcher raid = PB_RAID_PATTERN.matcher(rawMessage);
+		Matcher time = PB_NEW_TIME_PATTERN.matcher(rawMessage);
+		Matcher matched = raid.find() ? raid : (time.find() ? time : null);
+		if (matched == null) return;
+		double seconds = parsePbTime(matched.group("pb"));
+		int teamSize = 0;
+		try { teamSize = parseTeamSize(matched.group("teamsize")); }
+		catch (IllegalArgumentException ignored) { }
+		if (pendingPbBoss != null && pendingPbTick >= 0 && client.getTickCount() - pendingPbTick <= 5)
+		{
+			submitCategorizedPb(pendingPbBoss, teamSize, seconds);
+			pendingPbBoss = null;
+			pendingPbTick = -1;
+		}
+		else
+		{
+			pendingPbSeconds = seconds;
+			pendingPbTeamSize = teamSize;
+			pendingPbTick = client.getTickCount();
+		}
+	}
+
+	private void processAdventureLog()
+	{
+		if (client.getLocalPlayer() == null) return;
+		if (adventureLogMenuLoaded)
+		{
+			adventureLogMenuLoaded = false;
+			Widget menu = client.getWidget(InterfaceID.Menu.LJ_LAYER2);
+			if (menu != null && menu.getChild(1) != null)
+			{
+				Matcher title = ADVENTURE_LOG_TITLE_PATTERN.matcher(Text.removeTags(menu.getChild(1).getText()));
+				if (title.find()) adventureLogOwner = title.group(1).trim();
+			}
+		}
+		if (!adventureLogCountersLoaded) return;
+		adventureLogCountersLoaded = false;
+		if (adventureLogOwner == null || !WomMembership.normalizePlayerName(adventureLogOwner)
+			.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName()))) return;
+		Widget parent = client.getWidget(InterfaceID.Journalscroll.TEXTLAYER);
+		if (parent == null || parent.getStaticChildren() == null) return;
+		Widget[] children = parent.getStaticChildren();
+		List<String> lines = new ArrayList<>();
+		for (Widget child : children) lines.add(Text.removeTags(child.getText()).trim());
+		List<Map<String, Object>> records = parseAdventureLogPbs(lines);
+		if (!records.isEmpty())
+		{
+			submitPbBatch(records);
+		}
+	}
+
+	static List<Map<String, Object>> parseAdventureLogPbs(List<String> lines)
+	{
+		Map<String, Map<String, Object>> uniqueRecords = new LinkedHashMap<>();
+		if (lines == null) return new ArrayList<>();
+		for (int index = 0; index < lines.size(); index++)
+		{
+			String boss = lines.get(index) == null ? "" : lines.get(index).trim();
+			if (boss.isEmpty()) continue;
+			Map<String, Object> pending = null;
+			for (index++; index < lines.size(); index++)
+			{
+				String line = lines.get(index) == null ? "" : lines.get(index).trim();
+				if (line.isEmpty()) break;
+				Matcher descriptor = ADVENTURE_LOG_PB_PATTERN.matcher(line);
+				if (descriptor.matches())
+				{
+					String details = descriptor.group("details");
+					String recordedBoss = raidModeFromAdventureDetails(boss, details);
+					int teamSize = parseTeamSize(details);
+					pending = pbPayload(recordedBoss, teamSize, -1);
+					String kind = descriptor.group("kind");
+					if ("Theatre of Blood".equals(pending.get("boss")))
+					{
+						pending.put("timeType", kind.equalsIgnoreCase("Room time") ? "ROOM"
+							: kind.equalsIgnoreCase("Overall time") ? "OVERALL" : "");
+					}
+					else pending.put("timeType", "");
+					String inlineTime = descriptor.group("time");
+					if (inlineTime != null && !inlineTime.isEmpty())
+					{
+						pending.put("seconds", parsePbTime(inlineTime));
+						putAdventureRecord(uniqueRecords, pending);
+						pending = null;
+					}
+					continue;
+				}
+				Matcher timeOnly = ADVENTURE_LOG_TIME_ONLY_PATTERN.matcher(line);
+				if (pending != null && timeOnly.matches())
+				{
+					pending.put("seconds", parsePbTime(timeOnly.group("time")));
+					putAdventureRecord(uniqueRecords, pending);
+					pending = null;
+				}
+			}
+		}
+		return new ArrayList<>(uniqueRecords.values());
+	}
+
+	private static String raidModeFromAdventureDetails(String boss, String details)
+	{
+		String normalizedBoss = boss == null ? "" : boss.trim();
+		String normalizedDetails = details == null ? "" : details.toLowerCase(java.util.Locale.ROOT);
+		String combined = normalizedBoss.toLowerCase(java.util.Locale.ROOT);
+		if (combined.startsWith("theatre of blood") || combined.startsWith("theater of blood"))
+		{
+			if (normalizedDetails.contains("hard mode") && !combined.matches(".*\\b(hard|hard mode|hm|hmt)\\s*$"))
+				return normalizedBoss + " Hard Mode";
+			if (normalizedDetails.contains("entry mode") && !combined.contains("entry"))
+				return normalizedBoss + " Entry Mode";
+		}
+		else if (combined.startsWith("tombs of amascut") && normalizedDetails.contains("expert mode")
+			&& !combined.contains("expert")) return normalizedBoss + " Expert Mode";
+		return normalizedBoss;
+	}
+
+	private static void putAdventureRecord(Map<String, Map<String, Object>> records, Map<String, Object> record)
+	{
+		double seconds = ((Number) record.get("seconds")).doubleValue();
+		if (seconds <= 0) return;
+		String key = record.get("boss") + "\n" + record.get("mode") + "\n"
+			+ record.get("teamSize") + "\n" + record.get("timeType");
+		records.put(key, record);
+	}
+
+	private void submitCategorizedPb(String recordedBoss, int teamSize, double seconds)
+	{
+		if (teamSize <= 0 && recordedBoss != null)
+		{
+			if (recordedBoss.contains("Tombs of Amascut")) teamSize = toaTeamSize();
+			else if (recordedBoss.contains("Theatre of Blood")) teamSize = tobTeamSize();
+		}
+		Map<String, Object> values = pbPayload(recordedBoss, teamSize, seconds);
+		submitPb((String) values.get("boss"), (String) values.get("mode"), teamSize, seconds);
+	}
+
+	private int tobTeamSize()
+	{
+		return occupiedRaidSlots(new int[]{VarbitID.TOB_CLIENT_P0, VarbitID.TOB_CLIENT_P1,
+			VarbitID.TOB_CLIENT_P2, VarbitID.TOB_CLIENT_P3, VarbitID.TOB_CLIENT_P4});
+	}
+
+	private int toaTeamSize()
+	{
+		return occupiedRaidSlots(new int[]{VarbitID.TOA_CLIENT_P0, VarbitID.TOA_CLIENT_P1,
+			VarbitID.TOA_CLIENT_P2, VarbitID.TOA_CLIENT_P3, VarbitID.TOA_CLIENT_P4,
+			VarbitID.TOA_CLIENT_P5, VarbitID.TOA_CLIENT_P6, VarbitID.TOA_CLIENT_P7});
+	}
+
+	private int occupiedRaidSlots(int[] varbits)
+	{
+		int players = 0;
+		for (int varbit : varbits) players += Math.min(client.getVarbitValue(varbit), 1);
+		return players;
+	}
+
+	static Map<String, Object> pbPayload(String recordedBoss, int teamSize, double seconds)
+	{
+		String boss = recordedBoss == null ? "" : recordedBoss.trim();
+		String mode = "";
+		String normalized = boss.toLowerCase(java.util.Locale.ROOT)
+			.replace('(', ' ').replace(')', ' ').replace(':', ' ').replace('-', ' ')
+			.replaceAll("\\s+", " ").trim();
+		String canonicalRaid = null;
+		if (normalized.startsWith("theatre of blood") || normalized.startsWith("theater of blood"))
+		{
+			canonicalRaid = "Theatre of Blood";
+			if (normalized.matches(".*\\b(hard|hard mode|hm|hmt)\\s*$")) mode = "Hard Mode";
+			else if (normalized.matches(".*\\b(entry mode|story mode|entry)\\s*$")) mode = "Entry Mode";
+			else mode = "Normal";
+		}
+		else if (normalized.startsWith("tombs of amascut"))
+		{
+			canonicalRaid = "Tombs of Amascut";
+			if (normalized.matches(".*\\b(expert mode|expert)\\s*$")) mode = "Expert Mode";
+			else if (normalized.matches(".*\\b(entry mode|entry)\\s*$")) mode = "Entry Mode";
+			else mode = "Normal";
+		}
+		else if (normalized.startsWith("chambers of xeric"))
+		{
+			canonicalRaid = "Chambers of Xeric";
+			mode = normalized.matches(".*\\b(challenge mode|challenger mode|cm)\\s*$")
+				? "Challenge Mode" : "Normal";
+		}
+		else
+		{
+			String canonicalBoss = canonicalDesertTreasureBoss(normalized);
+			if (canonicalBoss != null)
+			{
+				boss = canonicalBoss;
+				mode = normalized.matches(".*\\bawakened\\s*$") ? "Awakened" : "Normal";
+			}
+			else if (normalized.equals("tztok jad") || normalized.equals("tzhaar fight cave"))
+			{
+				boss = "TzHaar Fight Cave";
+			}
+			else if (normalized.equals("tzkal zuk") || normalized.equals("the inferno")
+				|| normalized.equals("inferno"))
+			{
+				boss = "Inferno";
+			}
+		}
+		if (canonicalRaid != null) boss = canonicalRaid;
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("boss", boss);
+		result.put("mode", mode);
+		result.put("teamSize", Math.max(0, teamSize));
+		result.put("seconds", seconds);
+		return result;
+	}
+
+	private static String canonicalDesertTreasureBoss(String normalized)
+	{
+		if (normalized.startsWith("the whisperer") || normalized.startsWith("whisperer")) return "The Whisperer";
+		if (normalized.startsWith("the leviathan") || normalized.startsWith("leviathan")) return "The Leviathan";
+		if (normalized.startsWith("vardorvis")) return "Vardorvis";
+		if (normalized.startsWith("duke sucellus")) return "Duke Sucellus";
+		return null;
+	}
+
+	private static int parseTeamSize(String value)
+	{
+		if (value == null || value.trim().isEmpty()) return 0;
+		if ("solo".equalsIgnoreCase(value.trim()) || value.trim().startsWith("1 ")) return 1;
+		Matcher number = Pattern.compile("^(\\d+)").matcher(value.trim());
+		return number.find() ? Integer.parseInt(number.group(1)) : 0;
+	}
+
+	private static double parsePbTime(String value)
+	{
+		String[] components = value.split(":");
+		double seconds = 0;
+		for (String component : components) seconds = seconds * 60 + Double.parseDouble(component);
+		return seconds;
 	}
 
 	private synchronized void configurePolling()
@@ -2346,6 +2972,7 @@ public class ClanMessagesPlugin extends Plugin
 			mvpDropsPollingTask = null;
 		}
 		if (panel == null || !config.enabled() || serverBaseUrl() == null
+			|| client.getGameState() != GameState.LOGGED_IN
 			|| authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
 			return;
@@ -2361,6 +2988,8 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void fetchMessages()
 	{
+		if (client.getGameState() != GameState.LOGGED_IN || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty()) return;
 		if (!messageFetchInFlight.compareAndSet(false, true))
 		{
 			return;
@@ -2372,11 +3001,25 @@ public class ClanMessagesPlugin extends Plugin
 			messageFetchInFlight.set(false);
 			return;
 		}
-		HttpUrl url = base.newBuilder().addPathSegment("messages").addQueryParameter("after", lastMessageId).build();
+		boolean initializeSession = !messageSessionInitialized;
+		long requestGeneration = messageSessionGeneration.get();
+		HttpUrl.Builder urlBuilder = base.newBuilder()
+			.addPathSegment("messages")
+			.addQueryParameter("after", lastMessageId);
+		if (initializeSession)
+		{
+			urlBuilder.addQueryParameter("sessionStart", "1");
+		}
+		HttpUrl url = urlBuilder.build();
 		okHttpClient.newCall(requestBuilder(url).get().build()).enqueue(new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
+				if (requestGeneration != messageSessionGeneration.get())
+				{
+					messageFetchInFlight.set(false);
+					return;
+				}
 				log.debug("Unable to fetch clan messages", exception);
 				if (panel != null) panel.setStatus("Sem conexão");
 				messageFetchInFlight.set(false);
@@ -2386,6 +3029,10 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				try (Response ignored = response)
 				{
+					if (requestGeneration != messageSessionGeneration.get())
+					{
+						return;
+					}
 					String clearMarker = response.header("X-Live-On-Cleared-At", "");
 					if (!clearMarker.isEmpty() && !clearMarker.equals(lastClearMarker))
 					{
@@ -2396,6 +3043,23 @@ public class ClanMessagesPlugin extends Plugin
 					{
 						if (panel != null) panel.setStatus("Erro " + response.code());
 						return;
+					}
+					if (initializeSession)
+					{
+						String latestMessageId = response.header("X-Live-On-Latest-Message-Id", "");
+						if (!latestMessageId.isEmpty())
+						{
+							lastMessageId = maxMessageId(lastMessageId, latestMessageId);
+							if (!messageCursorAccount.isEmpty())
+							{
+								messageCursorByAccount.put(messageCursorAccount, lastMessageId);
+								configManager.setConfiguration(
+									"live-on-clan-messages",
+									messageCursorConfigKey(messageCursorAccount),
+									lastMessageId);
+							}
+						}
+						messageSessionInitialized = true;
 					}
 					ClanMessage[] received = gson.fromJson(response.body().string(), ClanMessage[].class);
 					log.debug("Message fetch for {} returned {} message(s) after id {}",
@@ -2430,6 +3094,10 @@ public class ClanMessagesPlugin extends Plugin
 							{
 								continue;
 							}
+							if (isTwitchLiveAnnouncement(message) && !config.liveStatusEnabled())
+							{
+								continue;
+							}
 							String pendingRankKey = rankRequestKey(message.getMessage());
 							if ("STAFF".equalsIgnoreCase(message.getMode())
 								&& pendingRankKey != null
@@ -2449,6 +3117,15 @@ public class ClanMessagesPlugin extends Plugin
 				}
 			}
 		});
+	}
+
+	private static boolean isTwitchLiveAnnouncement(ClanMessage message)
+	{
+		return message != null
+			&& "CLAN".equalsIgnoreCase(message.getMode())
+			&& "Live On".equalsIgnoreCase(message.getAuthor())
+			&& message.getMessage() != null
+			&& message.getMessage().contains("https://www.twitch.tv/");
 	}
 
 	private void fetchMvpDrops()
@@ -2492,6 +3169,114 @@ public class ClanMessagesPlugin extends Plugin
 		fetchLives();
 		fetchMvpMembers();
 		fetchClanTags();
+		fetchRecentActivities();
+		fetchPanelNotice();
+	}
+
+	private void fetchPanelNotice()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty()) return;
+		getJson("panel/notice", new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch panel notice", exception);
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful() || response.body() == null) return;
+					com.google.gson.JsonObject payload = gson.fromJson(
+						response.body().string(), com.google.gson.JsonObject.class);
+					String message = payload != null && payload.has("message")
+						? payload.get("message").getAsString() : "";
+					if (panel != null) panel.updatePanelNotice(message);
+				}
+			}
+		});
+	}
+
+	private void publishPanelNotice(String message)
+	{
+		if (!isStaff || message == null || message.trim().isEmpty()) return;
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("message", message.trim());
+		postJson("admin/panel-notice", gson.toJson(payload), new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to publish panel notice", exception);
+				if (panel != null) panel.setPanelNoticeStatus("Falha ao publicar aviso");
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (panel != null) panel.setPanelNoticeStatus(
+						response.isSuccessful() ? "Aviso publicado no Painel" : "Erro " + response.code());
+					if (response.isSuccessful()) fetchPanelNotice();
+				}
+			}
+		});
+	}
+
+	private void removePanelNotice()
+	{
+		if (!isStaff) return;
+		HttpUrl base = serverBaseUrl();
+		if (base == null) return;
+		HttpUrl url = base.newBuilder().addPathSegments("admin/panel-notice").build();
+		okHttpClient.newCall(requestBuilder(url).delete().build()).enqueue(new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to remove panel notice", exception);
+				if (panel != null) panel.setPanelNoticeStatus("Falha ao remover aviso");
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (panel != null) panel.setPanelNoticeStatus(
+						response.isSuccessful() ? "Aviso removido" : "Erro " + response.code());
+					if (response.isSuccessful() && panel != null) panel.updatePanelNotice("");
+				}
+			}
+		});
+	}
+
+	private void fetchRecentActivities()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty()) return;
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		getJson("stats/recent-activity", new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				if (isCurrentConnectionSession(generation, account))
+					log.debug("Unable to fetch recent clan activity", exception);
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!isCurrentConnectionSession(generation, account) || !response.isSuccessful()
+						|| response.body() == null) return;
+					RecentActivity[] values = gson.fromJson(response.body().string(), RecentActivity[].class);
+					if (panel != null) panel.updateRecentActivities(values == null
+						? java.util.Collections.emptyList() : java.util.Arrays.asList(values));
+				}
+			}
+		});
 	}
 
 	private void fetchMvpEfficiency()
@@ -2531,25 +3316,29 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void fetchLives()
 	{
-		if (!config.liveStatusEnabled() || authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
+		if (!config.liveStatusEnabled() || client.getGameState() != GameState.LOGGED_IN
+			|| authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
 			onlineLiveChannels.clear();
 			if (panel != null) panel.updateOnlineLives(java.util.Collections.emptyList());
 			return;
 		}
-		getJson("lives", liveChannelsCallback(false));
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		getJson("lives", liveChannelsCallback(false, generation, account));
 		if (isStaff && hasStaffAccessKey())
 		{
-			getJson("admin/live-channels", liveChannelsCallback(true));
+			getJson("admin/live-channels", liveChannelsCallback(true, generation, account));
 		}
 	}
 
-	private okhttp3.Callback liveChannelsCallback(boolean managed)
+	private okhttp3.Callback liveChannelsCallback(boolean managed, long generation, String account)
 	{
 		return new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
+				if (!isCurrentConnectionSession(generation, account)) return;
 				log.debug("Unable to fetch Twitch channels", exception);
 				if (managed && panel != null) panel.setLivesStatus("Falha ao atualizar");
 			}
@@ -2558,6 +3347,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				try (Response ignored = response)
 				{
+					if (!isCurrentConnectionSession(generation, account)) return;
 					if (!response.isSuccessful() || response.body() == null)
 					{
 						if (managed && panel != null) panel.setLivesStatus("Erro " + response.code());
@@ -2587,6 +3377,13 @@ public class ClanMessagesPlugin extends Plugin
 				}
 			}
 		};
+	}
+
+	private boolean isCurrentConnectionSession(long generation, String account)
+	{
+		return generation == connectionSessionGeneration.get()
+			&& client.getGameState() == GameState.LOGGED_IN
+			&& account != null && account.equals(authenticatedPlayerName);
 	}
 
 	private void saveLiveChannel(String rsn, String twitchLogin)
@@ -2802,6 +3599,150 @@ public class ClanMessagesPlugin extends Plugin
 		});
 	}
 
+	private void fetchPbCategories()
+	{
+		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()) return;
+		if (!pbCategoriesFetchInFlight.compareAndSet(false, true)) return;
+		if (panel != null) panel.setPbRefreshEnabled(false);
+		getJson("stats/pb-categories", new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch PB categories", exception);
+				finishPbCategoriesFetch();
+			}
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful() || response.body() == null)
+					{
+						log.debug("PB categories returned HTTP {}", response.code());
+						return;
+					}
+					PbCategory[] values = gson.fromJson(response.body().string(), PbCategory[].class);
+					if (panel != null) panel.updatePbCategories(values == null
+						? java.util.Collections.emptyList() : java.util.Arrays.asList(values));
+				}
+				finally { finishPbCategoriesFetch(); }
+			}
+		});
+	}
+
+	private void finishPbCategoriesFetch()
+	{
+		pbCategoriesFetchInFlight.set(false);
+		if (panel != null) panel.setPbRefreshEnabled(true);
+	}
+
+	private void fetchPbRanking(PbCategory category)
+	{
+		if (category == null || authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()) return;
+		long requestGeneration = pbRankingRequestGeneration.incrementAndGet();
+		if (panel != null) panel.beginPbRankingRequest(requestGeneration);
+		HttpUrl base = serverBaseUrl();
+		if (base == null) return;
+		HttpUrl url = base.newBuilder().addPathSegments("stats/pb-ranking")
+			.addQueryParameter("boss", category.boss)
+			.addQueryParameter("mode", category.mode == null ? "" : category.mode)
+			.addQueryParameter("teamSize", Integer.toString(category.team_size))
+			.addQueryParameter("timeType", category.time_type == null ? "" : category.time_type).build();
+		okHttpClient.newCall(requestBuilder(url).get().build()).enqueue(new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				if (requestGeneration != pbRankingRequestGeneration.get()) return;
+				log.debug("Unable to fetch PB ranking", exception);
+			}
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (requestGeneration != pbRankingRequestGeneration.get()) return;
+					if (!response.isSuccessful() || response.body() == null)
+					{
+						log.debug("PB ranking returned HTTP {}", response.code());
+						return;
+					}
+					PbRankingResponse parsed = gson.fromJson(response.body().string(), PbRankingResponse.class);
+					if (parsed != null && panel != null) panel.updatePbRanking(parsed, requestGeneration);
+				}
+			}
+		});
+	}
+
+	private void submitPb(String boss, String mode, int teamSize, double seconds)
+	{
+		submitPb(boss, mode, teamSize, seconds, null);
+	}
+
+	private void submitPb(String boss, String mode, int teamSize, double seconds, String combatAchievementSignature)
+	{
+		if (boss == null || boss.trim().isEmpty() || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty() || seconds <= 0) return;
+		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("boss", boss.trim());
+		payload.put("mode", mode == null ? "" : mode.trim());
+		payload.put("teamSize", Math.max(0, teamSize));
+		payload.put("seconds", seconds);
+		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to submit PB", exception);
+				clearFailedCombatAchievementPb(combatAchievementSignature);
+			}
+			@Override public void onResponse(okhttp3.Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (response.isSuccessful())
+					{
+						fetchPbCategories();
+					}
+					else
+					{
+						log.debug("PB submission failed with HTTP {}", response.code());
+						clearFailedCombatAchievementPb(combatAchievementSignature);
+					}
+				}
+			}
+		});
+	}
+
+	private void clearFailedCombatAchievementPb(String signature)
+	{
+		if (signature != null) submittedPbSignatures.remove(signature);
+	}
+
+	private void submitPbBatch(List<Map<String, Object>> records)
+	{
+		if (records == null || records.isEmpty() || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty()) return;
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("pbs", records);
+		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to import Adventure Log PBs", exception);
+			}
+			@Override public void onResponse(okhttp3.Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (response.isSuccessful())
+					{
+						fetchPbCategories();
+					}
+					else log.debug("Adventure Log PB import returned HTTP {}", response.code());
+				}
+			}
+		});
+	}
+
 	private void createClanTag(String code, String color)
 	{
 		String normalizedCode = code == null ? "" : code.trim().toUpperCase(java.util.Locale.ROOT);
@@ -2942,11 +3883,6 @@ public class ClanMessagesPlugin extends Plugin
 		return null;
 	}
 
-	java.util.Set<String> livePlayerNamesForDiagnostics()
-	{
-		return new java.util.LinkedHashSet<>(onlineLiveChannels.keySet());
-	}
-
 	static String normalizeChatPlayerName(String playerName)
 	{
 		return WomMembership.normalizePlayerName(playerName).toLowerCase(java.util.Locale.ROOT);
@@ -2996,6 +3932,11 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
+			configurePolling();
+			connectionSessionGeneration.incrementAndGet();
+			messageSessionInitialized = false;
+			messageSessionGeneration.incrementAndGet();
+			rankRequestsSessionInitialized = false;
 			deliveredPinnedMessageIds.clear();
 			pendingAllowlistedDrops.clear();
 			recentAllowlistedLootTicks.clear();
@@ -3009,6 +3950,10 @@ public class ClanMessagesPlugin extends Plugin
 			questAccount = "";
 			lastQuestPoints = -1;
 			lastMaximumQuestPoints = -1;
+		}
+		else if (event.getGameState() == GameState.LOGGED_IN && config.enabled())
+		{
+			configurePolling();
 		}
 	}
 
@@ -3052,10 +3997,13 @@ public class ClanMessagesPlugin extends Plugin
 			}
 			else
 			{
-				builder.append(Color.CYAN, validUrl);
-				if (validUrl.length() < original.length())
+				String displayed = original;
+				while (!displayed.isEmpty() && ".,;:!?)]}".indexOf(displayed.charAt(displayed.length() - 1)) >= 0)
+					displayed = displayed.substring(0, displayed.length() - 1);
+				builder.append(Color.CYAN, displayed);
+				if (displayed.length() < original.length())
 				{
-					builder.append(color, original.substring(validUrl.length()));
+					builder.append(color, original.substring(displayed.length()));
 				}
 			}
 			previousEnd = urls.end();
@@ -3538,6 +4486,7 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 					rankRequestPending = false;
 					fetchRankRequestStatus();
 					if (panel != null) { panel.setAccessMessage(""); panel.clearRanksStatus(); panel.setAuthenticated(true, staff); panel.setDeputyOwner(isDeputyOwner); panel.setBroadcastAllowed(canPublishBroadcast); panel.setAuthenticatedPlayer(rsn); }
+					fetchPbCategories();
 					if (staff && hasStaffAccessKey())
 					{
 						fetchRankRequests();
@@ -3639,12 +4588,13 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 								isDeputyOwner = isDeputyOwnerRole(roleName);
 								canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
 								switchMessageCursorAccount(rsn);
-								authenticatedPlayerName = rsn;
+							authenticatedPlayerName = rsn;
 								configurePolling();
 								rankRequestStatusKnown = false;
 								rankRequestPending = false;
 								fetchRankRequestStatus();
 								if (panel != null) { panel.setAccessMessage(""); panel.clearRanksStatus(); panel.setAuthenticated(true, staff); panel.setDeputyOwner(isDeputyOwner); panel.setBroadcastAllowed(canPublishBroadcast); panel.setAuthenticatedPlayer(rsn); }
+								fetchPbCategories();
 								if (staff && hasStaffAccessKey())
 								{
 									fetchRankRequests();
@@ -3746,6 +4696,9 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		{
 			return;
 		}
+		submittedPbSignatures.clear();
+		visibleCombatAchievementPage = "";
+		combatAchievementPbScanTicks = 0;
 		if (!messageCursorAccount.isEmpty())
 		{
 			messageCursorByAccount.put(messageCursorAccount, lastMessageId);
@@ -3755,6 +4708,10 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 				lastMessageId);
 		}
 		messageCursorAccount = accountKey;
+		pbRankingRequestGeneration.incrementAndGet();
+		messageSessionInitialized = false;
+		messageSessionGeneration.incrementAndGet();
+		rankRequestsSessionInitialized = false;
 		String storedCursor = configManager.getConfiguration(
 			"live-on-clan-messages",
 			messageCursorConfigKey(accountKey));
@@ -3813,14 +4770,6 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		catch (NumberFormatException exception) { return fallback; }
 	}
 
-	private long storedLong(String key, long fallback)
-	{
-		String value = configManager.getConfiguration("live-on-clan-messages", key);
-		if (value == null) return fallback;
-		try { return Long.parseLong(value); }
-		catch (NumberFormatException exception) { return fallback; }
-	}
-
 	private static String accountCacheKey(String accountName)
 	{
 		return accountName.toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "_");
@@ -3843,17 +4792,36 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			if (panel != null) panel.setRankRequestsStatus("Configure a chave da staff");
 			return;
 		}
+		if (!rankRequestsFetchInFlight.compareAndSet(false, true))
+		{
+			return;
+		}
+		long requestGeneration = messageSessionGeneration.get();
 		getJson("admin/rank-requests", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
-				log.debug("Unable to fetch rank requests", exception);
+				try
+				{
+					if (requestGeneration == messageSessionGeneration.get())
+					{
+						log.debug("Unable to fetch rank requests", exception);
+					}
+				}
+				finally
+				{
+					rankRequestsFetchInFlight.set(false);
+				}
 			}
 
 			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
 			{
 				try (Response ignored = response)
 				{
+					if (requestGeneration != messageSessionGeneration.get())
+					{
+						return;
+					}
 					if (!response.isSuccessful() || response.body() == null)
 					{
 						log.debug("Failed to fetch rank requests: " + response.code());
@@ -3874,19 +4842,46 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 					java.util.Set<String> currentPendingKeys = new java.util.HashSet<>();
 					for (RankRequestsPanel.RankRequest rankRequest : requestList)
 					{
-						String key = rankRequestKey(rankRequest.playerName, rankRequest.rankName);
-						currentPendingKeys.add(key);
-						if (displayedPendingRankRequests.add(key))
+						currentPendingKeys.add(rankRequestKey(rankRequest.playerName, rankRequest.rankName));
+					}
+					if (!rankRequestsSessionInitialized)
+					{
+						displayedPendingRankRequests.addAll(currentPendingKeys);
+						rankRequestsSessionInitialized = true;
+						if (!requestList.isEmpty())
 						{
-							String notification = rankRequest.playerName + " solicitou um rank: " + rankRequest.rankName;
+							int total = requestList.size();
+							String notification = total == 1
+								? "1 solicitação de rank pendente."
+								: total + " solicitações de rank pendentes.";
 							if (panel != null)
 							{
-								panel.addMessage(new ClanMessage(null, rankRequest.playerName, notification, "STAFF", false));
+								panel.addMessage(new ClanMessage(null, "Live On", notification, "STAFF", false));
 							}
 							queueBroadcast(notification, false);
 						}
 					}
+					else
+					{
+						for (RankRequestsPanel.RankRequest rankRequest : requestList)
+						{
+							String key = rankRequestKey(rankRequest.playerName, rankRequest.rankName);
+							if (displayedPendingRankRequests.add(key))
+							{
+								String notification = rankRequest.playerName + " solicitou um rank: " + rankRequest.rankName;
+								if (panel != null)
+								{
+									panel.addMessage(new ClanMessage(null, rankRequest.playerName, notification, "STAFF", false));
+								}
+								queueBroadcast(notification, false);
+							}
+						}
+					}
 					displayedPendingRankRequests.retainAll(currentPendingKeys);
+				}
+				finally
+				{
+					rankRequestsFetchInFlight.set(false);
 				}
 			}
 		});

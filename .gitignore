@@ -19,6 +19,7 @@ CLAUDE.md
 # Generated packages, local databases and recovery artifacts.
 /*.jar
 /*.zip
+/*.rar
 /*.sqlite3
 /*.csv
 /.codex-*

@@ -13,8 +13,8 @@ public interface ClanMessagesConfig extends Config
 
 	@ConfigItem(
 		keyName = "enabled",
-		name = "Conectar ao clan",
-		description = "Ativa mensagens, ranks e recursos compartilhados do clan",
+		name = "Conectar ao servidor do clan",
+		description = "Ativa os recursos do clan e envia seus PBs automaticamente ao servidor",
 		warning = THIRD_PARTY_WARNING,
 		position = 0
 	)
@@ -37,7 +37,7 @@ public interface ClanMessagesConfig extends Config
 
 	@ConfigItem(
 		keyName = "statsEnabled",
-		name = "Participar do ranking MVP",
+		name = "Participar do MVP mensal",
 		description = "Envia seus drops elegiveis para o ranking mensal do clan",
 		warning = THIRD_PARTY_WARNING,
 		position = 2
@@ -75,7 +75,7 @@ public interface ClanMessagesConfig extends Config
 	@Range(min = -20, max = 20)
 	@ConfigItem(
 		keyName = "sidebarIconPriority",
-		name = "Posição do ícone",
+		name = "Posição na sidebar",
 		description = "Use as setas para mover o ícone do plugin na barra lateral",
 		position = 5
 	)

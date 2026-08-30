@@ -61,7 +61,7 @@ final class RankRequestsPanel extends JPanel
 				return label;
 			}
 		});
-		requestsTable.setPreferredScrollableViewportSize(new Dimension(400, 300));
+		requestsTable.setPreferredScrollableViewportSize(new Dimension(220, 175));
 		JScrollPane scrollPane = new JScrollPane(requestsTable);
 		scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 		scrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
@@ -124,7 +124,7 @@ final class RankRequestsPanel extends JPanel
 		activityLog.setWrapStyleWord(true);
 		JScrollPane activityScrollPane = new JScrollPane(activityLog);
 		activityScrollPane.setBorder(BorderFactory.createTitledBorder("Atualizações recentes"));
-		activityScrollPane.setPreferredSize(new Dimension(400, 145));
+		activityScrollPane.setPreferredSize(new Dimension(220, 105));
 
 		JPanel footer = new JPanel(new BorderLayout(5, 5));
 		footer.add(actions, BorderLayout.NORTH);

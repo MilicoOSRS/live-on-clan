@@ -44,7 +44,7 @@ final class ClanTagsPanel extends JPanel
 		setLayout(new BorderLayout(5, 5));
 		setBorder(BorderFactory.createEmptyBorder(7, 7, 7, 7));
 
-		JPanel forms = new JPanel(new GridLayout(0, 1, 6, 6));
+		JPanel forms = new JPanel(new GridLayout(0, 1, 3, 3));
 		JPanel createForm = new JPanel(new GridLayout(0, 1, 3, 3));
 		createForm.setBorder(BorderFactory.createTitledBorder("Criar etiqueta"));
 		createForm.add(new JLabel("Sigla (máximo 5 caracteres)"));
@@ -94,10 +94,13 @@ final class ClanTagsPanel extends JPanel
 			else removeMemberAction.accept(rows.get(selectedRow).tag, rows.get(selectedRow).member);
 		});
 		removeMember.setToolTipText("Remover o membro selecionado da etiqueta");
-		JPanel actions = new JPanel(new GridLayout(3, 1, 0, 3));
+		JPanel actions = new JPanel(new GridLayout(2, 2, 3, 3));
 		actions.add(refresh);
 		actions.add(removeMember);
 		actions.add(deleteTag);
+		JPanel actionFiller = new JPanel();
+		actionFiller.setOpaque(false);
+		actions.add(actionFiller);
 		JPanel footer = new JPanel(new BorderLayout(3, 3));
 		footer.add(actions, BorderLayout.NORTH);
 		footer.add(status, BorderLayout.SOUTH);
