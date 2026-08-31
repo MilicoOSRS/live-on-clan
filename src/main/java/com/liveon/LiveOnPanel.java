@@ -229,12 +229,14 @@ final class LiveOnPanel extends JPanel
 						"Novo melhor tempo do clã em ");
 				}
 				boolean collective = player.isEmpty();
+				boolean clanRecord = "CLAN_RECORD".equals(activity.type);
 				String key = activityKey(activity);
 				boolean expanded = expandedActivities.contains(key);
 				boolean expandable = (!collective && (player.length() > 22 || detail.length() > 29))
 					|| (collective && detail.length() > 50);
-				JPanel text = createActivityText(player, detail, recordTime, collective, expanded);
-				int rowHeight = expanded ? Math.max(43, text.getPreferredSize().height + 10) : 43;
+				JPanel text = createActivityText(player, detail, recordTime, collective, clanRecord, expanded);
+				int collapsedHeight = clanRecord ? 59 : 43;
+				int rowHeight = expanded ? Math.max(collapsedHeight, text.getPreferredSize().height + 10) : collapsedHeight;
 				row.setPreferredSize(new Dimension(210, rowHeight));
 				row.setMaximumSize(new Dimension(Integer.MAX_VALUE, rowHeight));
 				row.add(marker, BorderLayout.WEST);
@@ -246,11 +248,11 @@ final class LiveOnPanel extends JPanel
 						if (!expandedActivities.remove(key)) expandedActivities.add(key);
 						updateRecent(currentActivities);
 					};
-					JButton toggle = new JButton(expanded ? "▲" : "▼");
+					JButton toggle = new JButton(new ActivityToggleIcon(expanded));
 					toggle.setToolTipText(expanded ? "Recolher atividade" : "Expandir atividade");
 					toggle.setMargin(new java.awt.Insets(0, 1, 0, 1));
 					toggle.setFocusable(false);
-					toggle.setPreferredSize(new Dimension(19, 19));
+					toggle.setPreferredSize(new Dimension(22, 22));
 					toggle.addActionListener(event -> toggleActivity.run());
 					row.add(toggle, BorderLayout.EAST);
 					makeClickable(row, toggleActivity);
@@ -286,7 +288,7 @@ final class LiveOnPanel extends JPanel
 	}
 
 	private static JPanel createActivityText(String player, String detail, String recordTime,
-		boolean collective, boolean expanded)
+		boolean collective, boolean clanRecord, boolean expanded)
 	{
 		JPanel text = new JPanel();
 		text.setOpaque(false);
@@ -295,7 +297,7 @@ final class LiveOnPanel extends JPanel
 		String tooltip = collective ? escapeHtml(detail + timeSuffix)
 			: "<html><b>" + escapeHtml(player) + "</b><br>"
 				+ escapeHtml(detail + timeSuffix) + "</html>";
-		if (!recordTime.isEmpty())
+		if (clanRecord && !recordTime.isEmpty())
 		{
 			JPanel heading = new JPanel(new BorderLayout(4, 0));
 			heading.setOpaque(false);
@@ -309,11 +311,16 @@ final class LiveOnPanel extends JPanel
 			heading.add(time, BorderLayout.EAST);
 			text.add(heading);
 
-			JLabel description = expanded
-				? new JLabel("<html><div style='width:125px'>" + escapeHtml(detail) + "</div></html>")
-				: new JLabel(abbreviate(detail, 31));
-			description.setToolTipText(tooltip);
-			text.add(description);
+			JLabel recordLabel = new JLabel("Novo melhor tempo do clã");
+			recordLabel.setToolTipText(tooltip);
+			text.add(recordLabel);
+			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
+			JLabel bossLabel = expanded
+				? new JLabel("<html><div style='width:125px'><b>" + escapeHtml(boss) + "</b></div></html>")
+				: new JLabel("<html><b>" + escapeHtml(abbreviate(boss, 24)) + "</b></html>");
+			bossLabel.setForeground(new Color(185, 205, 220));
+			bossLabel.setToolTipText(tooltip);
+			text.add(bossLabel);
 			return text;
 		}
 		if (expanded)
@@ -366,6 +373,28 @@ final class LiveOnPanel extends JPanel
 	{
 		if (value == null || value.length() <= maximumLength) return value;
 		return value.substring(0, Math.max(0, maximumLength - 1)).trim() + "…";
+	}
+
+	private static final class ActivityToggleIcon implements javax.swing.Icon
+	{
+		private final boolean expanded;
+
+		private ActivityToggleIcon(boolean expanded)
+		{
+			this.expanded = expanded;
+		}
+
+		@Override
+		public void paintIcon(Component component, java.awt.Graphics graphics, int x, int y)
+		{
+			graphics.setColor(component.isEnabled() ? new Color(190, 190, 190) : new Color(105, 105, 105));
+			int[] xs = {x, x + 8, x + 4};
+			int[] ys = expanded ? new int[]{y + 6, y + 6, y + 1} : new int[]{y + 1, y + 1, y + 6};
+			graphics.fillPolygon(xs, ys, 3);
+		}
+
+		@Override public int getIconWidth() { return 9; }
+		@Override public int getIconHeight() { return 8; }
 	}
 
 	private void applyActivityIcon(JLabel marker, RecentActivity activity)

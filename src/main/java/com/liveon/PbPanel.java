@@ -45,9 +45,11 @@ final class PbPanel extends JPanel
 	private final JPanel bossesGroup = new JPanel();
 	private final List<PbCategory> availableCategories = new ArrayList<>();
 	private final JPanel ranking = new VerticalRankingPanel();
+	private final JScrollPane rankingScroll = new JScrollPane(ranking);
 	private final JLabel ownPb = new JLabel("Nenhum PB sincronizado", SwingConstants.CENTER);
 	private final JPanel tutorial = new JPanel();
 	private final JButton tutorialToggle = new JButton("▾ Como registrar seus PBs?");
+	private final JPanel participationNotice = new JPanel(new BorderLayout());
 	private final JButton refresh = new JButton("↻");
 	private final Consumer<PbCategory> selectionAction;
 	private boolean updatingFilters;
@@ -65,6 +67,9 @@ final class PbPanel extends JPanel
 		configureTutorial();
 		top.add(tutorialToggle);
 		top.add(tutorial);
+		top.add(Box.createVerticalStrut(7));
+		configureParticipationNotice();
+		top.add(participationNotice);
 		top.add(Box.createVerticalStrut(7));
 		JLabel title = new JLabel("MELHORES TEMPOS DO CLAN");
 		title.setForeground(ORANGE);
@@ -113,6 +118,7 @@ final class PbPanel extends JPanel
 			updatingFilters = true;
 			bosses.setSelectedItem(null);
 			updatingFilters = false;
+			clearSearchAfterMenuSelection();
 			positionFilters(true);
 			rebuildCategoryFilters();
 		});
@@ -137,6 +143,7 @@ final class PbPanel extends JPanel
 			updatingFilters = true;
 			raids.setSelectedItem(null);
 			updatingFilters = false;
+			clearSearchAfterMenuSelection();
 			positionFilters(false);
 			rebuildCategoryFilters();
 		});
@@ -184,11 +191,33 @@ final class PbPanel extends JPanel
 		add(top, BorderLayout.NORTH);
 
 		ranking.setLayout(new BoxLayout(ranking, BoxLayout.Y_AXIS));
-		JScrollPane scroll = new JScrollPane(ranking);
-		scroll.setBorder(BorderFactory.createEmptyBorder());
-		scroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-		add(scroll, BorderLayout.CENTER);
+		rankingScroll.setBorder(BorderFactory.createEmptyBorder());
+		rankingScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		add(rankingScroll, BorderLayout.CENTER);
 
+	}
+
+	private void configureParticipationNotice()
+	{
+		participationNotice.setAlignmentX(Component.LEFT_ALIGNMENT);
+		participationNotice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
+		participationNotice.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(BLUE),
+			BorderFactory.createEmptyBorder(5, 7, 5, 7)));
+		JLabel message = new JLabel("<html><b>Participação desativada</b><br>"
+			+ "Ative nas configurações<br>para registrar seus PBs.</html>");
+		message.setForeground(BLUE);
+		participationNotice.add(message, BorderLayout.CENTER);
+	}
+
+	void setParticipationEnabled(boolean enabled)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			participationNotice.setVisible(!enabled);
+			participationNotice.getParent().revalidate();
+			participationNotice.getParent().repaint();
+		});
 	}
 
 	private static void configureFittedButton(javax.swing.AbstractButton button, String text)
@@ -349,6 +378,24 @@ final class PbPanel extends JPanel
 		searchSuggestions.setVisible(false);
 	}
 
+	private void clearSearchAfterMenuSelection()
+	{
+		updatingGlobalSearch = true;
+		if (globalSearch.hasFocus())
+		{
+			globalSearch.setText("");
+			globalSearch.setForeground(javax.swing.UIManager.getColor("TextField.foreground"));
+		}
+		else
+		{
+			globalSearch.setText("Pesquisar");
+			globalSearch.setForeground(new Color(145, 145, 145));
+		}
+		updatingGlobalSearch = false;
+		clearSearch.setVisible(false);
+		searchSuggestions.setVisible(false);
+	}
+
 	private boolean containsBoss(String boss)
 	{
 		for (PbCategory category : availableCategories)
@@ -384,7 +431,7 @@ final class PbPanel extends JPanel
 			+ "1. Abra o <b>Adventure Log</b> da sua POH para importar todos os seus tempos.<br><br>"
 			+ "2. Nos <b>Combat Achievements</b>, abra a página do boss que quiser registrar.<br><br>"
 			+ "3. Scoreboards também são reconhecidos.<br><br>"
-			+ "Seus novos PBs serão registrados automaticamente."
+			+ "Com <b>Participar do ranking de PBs</b> ativado, seus novos PBs serão registrados automaticamente."
 			+ "</div></html>");
 		instructions.setAlignmentX(Component.LEFT_ALIGNMENT);
 		instructions.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
@@ -662,12 +709,20 @@ final class PbPanel extends JPanel
 			{
 				ranking.add(rankingRow(entry));
 			}
-			setTutorialExpanded(response.own == null);
 			String ownText = response.own == null ? "Você ainda não possui PB<br>nesta categoria"
 				: "Seu PB: " + formatTime(response.own.seconds) + " · " + response.own.position + "º lugar";
 			ownPb.setText("<html><div style='text-align:center'>" + ownText + "</div></html>");
 			ranking.revalidate();
 			ranking.repaint();
+			rankingScroll.getViewport().revalidate();
+			revalidate();
+			repaint();
+			SwingUtilities.invokeLater(() ->
+			{
+				rankingScroll.getViewport().revalidate();
+				revalidate();
+				repaint();
+			});
 		});
 	}
 

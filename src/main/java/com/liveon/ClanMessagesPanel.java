@@ -883,10 +883,12 @@ final class ClanMessagesPanel extends PluginPanel
 	void clearMessages() { SwingUtilities.invokeLater(() -> messages.setText("")); }
 	void setPublishing(boolean value) { publish.setEnabled(!value); }
 	void setMvpDrops(java.util.List<MvpDropEntry> ranking) { mvpTab.updateDropRanking(ranking); }
+	void setMvpParticipationEnabled(boolean enabled) { mvpTab.setParticipationEnabled(enabled); }
 	void updatePbCategories(java.util.List<PbCategory> categories) { pbTab.updateCategories(categories); }
 	void beginPbRankingRequest(long generation) { pbTab.beginRankingRequest(generation); }
 	void updatePbRanking(PbRankingResponse response, long generation) { pbTab.updateRanking(response, generation); }
 	void setPbRefreshEnabled(boolean enabled) { pbTab.setRefreshEnabled(enabled); }
+	void setPbParticipationEnabled(boolean enabled) { pbTab.setParticipationEnabled(enabled); }
 	PbCategory selectedPbCategory() { return pbTab.selectedCategory(); }
 	void setMvpEfficiency(java.util.List<MvpEfficiencyEntry> ehb, java.util.List<MvpEfficiencyEntry> ehp)
 	{

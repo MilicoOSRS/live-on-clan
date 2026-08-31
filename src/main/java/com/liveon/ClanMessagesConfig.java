@@ -14,7 +14,7 @@ public interface ClanMessagesConfig extends Config
 	@ConfigItem(
 		keyName = "enabled",
 		name = "Conectar ao servidor do clan",
-		description = "Ativa os recursos do clan e envia seus PBs automaticamente ao servidor",
+		description = "Ativa os recursos online do clan",
 		warning = THIRD_PARTY_WARNING,
 		position = 0
 	)
@@ -48,11 +48,23 @@ public interface ClanMessagesConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "pbRankingEnabled",
+		name = "Participar do ranking de PBs",
+		description = "Envia seus tempos registrados para o ranking privado do clan; requer conexao ao servidor",
+		warning = THIRD_PARTY_WARNING,
+		position = 3
+	)
+	default boolean pbRankingEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "staffAccessKey",
 		name = "Chave da staff",
 		description = "Chave administrativa fornecida somente aos membros da staff",
 		secret = true,
-		position = 3,
+		position = 4,
 		hidden = true
 	)
 	default String staffAccessKey()
@@ -65,7 +77,7 @@ public interface ClanMessagesConfig extends Config
 		name = "Enviar drops ao Discord",
 		description = "Publica seus drops raros no Discord do clan",
 		warning = THIRD_PARTY_WARNING,
-		position = 4
+		position = 5
 	)
 	default boolean discordDropsEnabled()
 	{
@@ -77,7 +89,7 @@ public interface ClanMessagesConfig extends Config
 		keyName = "sidebarIconPriority",
 		name = "Posição na sidebar",
 		description = "Use as setas para mover o ícone do plugin na barra lateral",
-		position = 5
+		position = 6
 	)
 	default int sidebarIconPriority()
 	{

@@ -123,6 +123,9 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern ADVENTURE_LOG_TIME_ONLY_PATTERN = Pattern.compile(
 		"^(?<time>[0-9:]+(?:\\.[0-9]+)?)$");
 	private static final int PET_DETAILS_WAIT_TICKS = 5;
+	static final String DISCORD_LOOT_ATTACHMENT = "loot.png";
+	static final String DISCORD_PET_ATTACHMENT = "pet.png";
+	private static final int DISCORD_EMBED_DESCRIPTION_LIMIT = 4096;
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
@@ -278,6 +281,8 @@ public class ClanMessagesPlugin extends Plugin
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey);
+		panel.setPbParticipationEnabled(config.pbRankingEnabled());
+		panel.setMvpParticipationEnabled(config.statsEnabled());
 		panel.clearRankDetails();
 		if (config.enabled())
 		{
@@ -352,6 +357,14 @@ public class ClanMessagesPlugin extends Plugin
 			if ("sidebarIconPriority".equals(event.getKey()))
 			{
 				rebuildNavigationButton();
+			}
+			if ("pbRankingEnabled".equals(event.getKey()) && panel != null)
+			{
+				panel.setPbParticipationEnabled(config.pbRankingEnabled());
+			}
+			if ("statsEnabled".equals(event.getKey()) && panel != null)
+			{
+				panel.setMvpParticipationEnabled(config.statsEnabled());
 			}
 			if ("enabled".equals(event.getKey()))
 			{
@@ -470,7 +483,10 @@ public class ClanMessagesPlugin extends Plugin
 		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
 		if (event.getType() == ChatMessageType.GAMEMESSAGE)
 		{
-			capturePersonalBest(event.getMessage(), message);
+			if (isPbParticipationEnabled())
+			{
+				capturePersonalBest(event.getMessage(), message);
+			}
 			PendingAllowlistedDrop valuableDrop = allowlistedValuableDrop(message);
 			if (valuableDrop != null)
 			{
@@ -1459,7 +1475,7 @@ public class ClanMessagesPlugin extends Plugin
 		boolean elite, boolean master, boolean grandmaster)
 	{
 		java.util.List<String> result = new ArrayList<>();
-		if (!bankLoaded) result.add("! Abra o banco uma vez para verificar todos os itens");
+		if (!bankLoaded) result.add("! Abra o banco uma vez<br>para verificar seus itens");
 		result.add(pointsRequirement("Quest points", questPoints, 300, "aguarde o login carregar"));
 		result.add(itemRequirement("Quest cape", questCape, bankLoaded));
 		result.add(itemRequirement("Fire cape", fireCape, bankLoaded));
@@ -1962,7 +1978,7 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		Map<String, Object> embed = new LinkedHashMap<>();
 		embed.put("title", "Loot Drop");
-		embed.put("description", description);
+		embed.put("description", limitDiscordDescription(description));
 		embed.put("color", dropEmbedColor(totalValue));
 		embed.put("author", author(playerName));
 		embed.put("timestamp", Instant.now().toString());
@@ -2013,7 +2029,7 @@ public class ClanMessagesPlugin extends Plugin
 			if (screenshot != null)
 			{
 				Map<String, Object> image = new LinkedHashMap<>();
-				image.put("url", "attachment://loot.png");
+				image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
 				embed.put("image", image);
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
 				ImageIO.write((BufferedImage) screenshot, "png", output);
@@ -2025,7 +2041,7 @@ public class ClanMessagesPlugin extends Plugin
 				.addFormDataPart("payload_json", gson.toJson(payload));
 			if (screenshotBytes != null)
 			{
-				multipart.addFormDataPart("file", "loot.png",
+				multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
 					RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
 			}
 			Request request = discordNotificationRequest(multipart.build());
@@ -2061,6 +2077,20 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		String safe = value == null ? "-" : value.replace("```", "'''");
 		return "```\n" + safe + "\n```";
+	}
+
+	static String discordAttachmentUrl(String fileName)
+	{
+		return "attachment://" + fileName;
+	}
+
+	static String limitDiscordDescription(String description)
+	{
+		if (description == null || description.length() <= DISCORD_EMBED_DESCRIPTION_LIMIT)
+		{
+			return description;
+		}
+		return description.substring(0, DISCORD_EMBED_DESCRIPTION_LIMIT - 3) + "...";
 	}
 
 	private static String formatGp(long value)
@@ -2253,7 +2283,7 @@ public class ClanMessagesPlugin extends Plugin
 		if (screenshot != null)
 		{
 			Map<String, Object> image = new LinkedHashMap<>();
-			image.put("url", "attachment://loot.png");
+			image.put("url", discordAttachmentUrl(DISCORD_PET_ATTACHMENT));
 			embed.put("image", image);
 		}
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -2287,7 +2317,8 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
 				ImageIO.write((BufferedImage) screenshot, "png", output);
-				multipart.addFormDataPart("file", "pet.png", RequestBody.create(MediaType.parse("image/png"), output.toByteArray()));
+				multipart.addFormDataPart("file", DISCORD_PET_ATTACHMENT,
+					RequestBody.create(MediaType.parse("image/png"), output.toByteArray()));
 			}
 			Request request = discordNotificationRequest(multipart.build());
 			if (request == null)
@@ -2361,10 +2392,13 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
-		processAdventureLog();
-		armCombatAchievementPbScanForVisiblePage();
-		processCombatAchievementBossPb();
-		processBossStatisticsBoardPb();
+		if (isPbParticipationEnabled())
+		{
+			processAdventureLog();
+			armCombatAchievementPbScanForVisiblePage();
+			processCombatAchievementBossPb();
+			processBossStatisticsBoardPb();
+		}
 		if (pendingPbTick >= 0 && client.getTickCount() - pendingPbTick > 5)
 		{
 			pendingPbBoss = null;
@@ -3678,7 +3712,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void submitPb(String boss, String mode, int teamSize, double seconds, String combatAchievementSignature)
 	{
-		if (boss == null || boss.trim().isEmpty() || authenticatedPlayerName == null
+		if (!isPbParticipationEnabled() || boss == null || boss.trim().isEmpty() || authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty() || seconds <= 0) return;
 		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
 		payload.put("playerName", authenticatedPlayerName);
@@ -3716,9 +3750,14 @@ public class ClanMessagesPlugin extends Plugin
 		if (signature != null) submittedPbSignatures.remove(signature);
 	}
 
+	private boolean isPbParticipationEnabled()
+	{
+		return config.enabled() && config.pbRankingEnabled();
+	}
+
 	private void submitPbBatch(List<Map<String, Object>> records)
 	{
-		if (records == null || records.isEmpty() || authenticatedPlayerName == null
+		if (!isPbParticipationEnabled() || records == null || records.isEmpty() || authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty()) return;
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("playerName", authenticatedPlayerName);

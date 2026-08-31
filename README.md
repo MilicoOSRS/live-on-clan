@@ -8,7 +8,7 @@ Plugin oficial do **Live On** para RuneLite. Reúne comunicados do clã, solicit
 
 1. Instale **Live On Clan** pelo Plugin Hub.
 2. Abra as configurações e ative **Conectar ao clan**, opção necessária para utilizar os recursos online.
-3. Ative também as funções opcionais que deseja usar: **Mostrar lives online**, **Participar do ranking MVP** e **Enviar drops ao Discord**.
+3. Ative também as funções opcionais que deseja usar: **Mostrar lives online**, **Participar do ranking MVP**, **Participar do ranking de PBs** e **Enviar drops ao Discord**.
 4. Entre no Clan Chat do Live On, abra o painel e clique em **Verificar agora**.
 
 ## Comunicados
@@ -32,6 +32,10 @@ Receba avisos publicados pela staff e consulte o comunicado fixado ao entrar no 
 - **MVP EHP:** progresso mensal de Efficient Hours Played pelo Wise Old Man.
 
 Os rankings exibem o Top 10 e reiniciam no início de cada mês.
+
+## Rankings de PBs
+
+Consulte os melhores tempos dos membros verificados do Live On. A participação é opcional: somente com **Participar do ranking de PBs** ativado o plugin lê os PBs visíveis do personagem local no Adventure Log, nos Combat Achievements e nos scoreboards compatíveis, enviando-os ao ranking privado do clã.
 
 ## Live ON
 

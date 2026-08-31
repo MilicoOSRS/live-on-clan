@@ -11,6 +11,28 @@ import static org.junit.Assert.assertTrue;
 public class DiscordLootFilterTest
 {
 	@Test
+	public void usesMatchingDiscordAttachmentReferences()
+	{
+		assertEquals("attachment://loot.png", ClanMessagesPlugin.discordAttachmentUrl(
+			ClanMessagesPlugin.DISCORD_LOOT_ATTACHMENT));
+		assertEquals("attachment://pet.png", ClanMessagesPlugin.discordAttachmentUrl(
+			ClanMessagesPlugin.DISCORD_PET_ATTACHMENT));
+	}
+
+	@Test
+	public void limitsDiscordDescriptionsWithoutChangingNormalDrops()
+	{
+		String normal = "1x Oathplate legs (89.0M)\nYama";
+		assertEquals(normal, ClanMessagesPlugin.limitDiscordDescription(normal));
+
+		char[] characters = new char[5000];
+		Arrays.fill(characters, 'x');
+		String limited = ClanMessagesPlugin.limitDiscordDescription(new String(characters));
+		assertEquals(4096, limited.length());
+		assertTrue(limited.endsWith("..."));
+	}
+
+	@Test
 	public void matchesExactNamesWithoutCaseSensitivity()
 	{
 		assertTrue(ClanMessagesPlugin.matchesDiscordFilter(

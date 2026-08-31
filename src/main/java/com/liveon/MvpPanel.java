@@ -46,12 +46,14 @@ final class MvpPanel extends JPanel
 	private static final Color DROP_GROUP_DARK = new Color(35, 35, 35);
 	private static final Color DROP_GROUP_LIGHT = new Color(44, 44, 44);
 	private static final Color PANEL_BACKGROUND = new Color(36, 36, 36);
+	private static final Color NOTICE_BLUE = new Color(90, 190, 245);
 	private static final Icon IRONMAN_ICON = officialIronIcon("ironman.png");
 	private static final Icon HARDCORE_IRONMAN_ICON = officialIronIcon("hardcore_ironman.png");
 	private static final Icon ULTIMATE_IRONMAN_ICON = officialIronIcon("ultimate_ironman.png");
 	private final JPanel dropEntries = new WidthTrackingPanel();
 	private final JPanel ehbEntries = new WidthTrackingPanel();
 	private final JPanel ehpEntries = new WidthTrackingPanel();
+	private final JPanel participationNotice = new JPanel(new BorderLayout());
 	private List<MvpDropEntry> liveRanking = Collections.emptyList();
 	private String expandedDropPlayer;
 
@@ -133,7 +135,13 @@ final class MvpPanel extends JPanel
 	{
 		JPanel section = new JPanel(new BorderLayout());
 		section.setBackground(PANEL_BACKGROUND);
-		section.add(createDropsHeader(), BorderLayout.NORTH);
+		JPanel top = new JPanel();
+		top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
+		top.setBackground(PANEL_BACKGROUND);
+		top.add(createDropsHeader());
+		configureParticipationNotice();
+		top.add(participationNotice);
+		section.add(top, BorderLayout.NORTH);
 		dropEntries.setLayout(new BoxLayout(dropEntries, BoxLayout.Y_AXIS));
 		dropEntries.setBackground(PANEL_BACKGROUND);
 		dropEntries.setBorder(BorderFactory.createEmptyBorder(8, 7, 10, 7));
@@ -144,6 +152,31 @@ final class MvpPanel extends JPanel
 		rankingScrollPane.getVerticalScrollBar().setUnitIncrement(12);
 		section.add(rankingScrollPane, BorderLayout.CENTER);
 		return section;
+	}
+
+	private void configureParticipationNotice()
+	{
+		participationNotice.setAlignmentX(Component.LEFT_ALIGNMENT);
+		participationNotice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 64));
+		participationNotice.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(7, 7, 0, 7, PANEL_BACKGROUND),
+			BorderFactory.createCompoundBorder(
+				BorderFactory.createLineBorder(NOTICE_BLUE),
+				BorderFactory.createEmptyBorder(5, 7, 5, 7))));
+		JLabel message = new JLabel("<html><b>Participação desativada</b><br>"
+			+ "Ative nas configurações<br>para registrar seus drops.</html>");
+		message.setForeground(NOTICE_BLUE);
+		participationNotice.add(message, BorderLayout.CENTER);
+	}
+
+	void setParticipationEnabled(boolean enabled)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			participationNotice.setVisible(!enabled);
+			participationNotice.revalidate();
+			participationNotice.repaint();
+		});
 	}
 
 	private static JPanel createDropsHeader()
@@ -361,7 +394,7 @@ final class MvpPanel extends JPanel
 		applyAccountIcon(name, entry.getAccountType());
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
 		JLabel caption = new JLabel("Líder do mês");
-		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 14f));
+		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 15f));
 		caption.setForeground(new Color(180, 161, 110));
 		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
 		identity.setOpaque(false);
@@ -567,16 +600,19 @@ final class MvpPanel extends JPanel
 		applyAccountIcon(name, entry.getAccountType());
 		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
 		JLabel caption = new JLabel("Líder do mês");
-		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 14f));
+		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 15f));
 		caption.setForeground(new Color(180, 161, 110));
-		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
+		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
+		identity.setOpaque(false);
+		identity.add(name);
+		identity.add(caption);
+		JLabel value = new JLabel(formatValue(entry.getTotalValue()), SwingConstants.RIGHT);
 		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
 		value.setForeground(GOLD);
-		JPanel leaderHeader = new JPanel(new GridLayout(0, 1, 0, 1));
+		JPanel leaderHeader = new JPanel(new BorderLayout(5, 0));
 		leaderHeader.setOpaque(false);
-		leaderHeader.add(name);
-		leaderHeader.add(caption);
-		leaderHeader.add(value);
+		leaderHeader.add(identity, BorderLayout.CENTER);
+		leaderHeader.add(value, BorderLayout.EAST);
 		JPanel content = new JPanel(new BorderLayout(0, 6));
 		content.setOpaque(false);
 		content.add(leaderHeader, BorderLayout.NORTH);
@@ -763,8 +799,7 @@ final class MvpPanel extends JPanel
 		{
 			if (drop.getValue() < 1_000_000L || displayed >= 3) continue;
 			String readableItem = drop.getItem().replaceFirst("^(\\d+)x\\s*", "$1x ");
-			String dropLine = readableItem + "  •  " + formatValue(drop.getValue());
-			JLabel item = new JLabel(dropLine);
+			JLabel item = new JLabel(readableItem);
 			item.setToolTipText(drop.getItem() + (drop.getSource() == null || drop.getSource().isEmpty()
 				? "" : " • " + drop.getSource()));
 			item.setForeground(new Color(230, 210, 145));

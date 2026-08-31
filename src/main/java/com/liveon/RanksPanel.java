@@ -29,8 +29,8 @@ final class RanksPanel extends JPanel
 	private static final int ICON_TEXT_WIDTH = 132;
 	private static final int REQUIREMENT_TEXT_WIDTH = 158;
 	private static final int NEXT_REQUIREMENT_TEXT_WIDTH = 148;
-	private static final int REQUIREMENT_NOTICE_TEXT_WIDTH = 146;
-	private static final int REQUIREMENT_NOTICE_WIDTH = 164;
+	private static final int REQUIREMENT_NOTICE_TEXT_WIDTH = 174;
+	private static final int REQUIREMENT_NOTICE_WIDTH = PANEL_WIDTH - 30;
 	private static final Color ORANGE = new Color(190, 104, 0);
 	private static final String REQUEST_PENDING_TEXT = "Aguardando aprovação";
 	private static final String REQUEST_PENDING_STATUS = "Solicitação enviada para a staff.";
