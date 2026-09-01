@@ -16,6 +16,7 @@ final class MvpDropEntry
 	private MvpDropDetail[] topDrops;
 	@SerializedName("account_type")
 	private String accountType;
+	private int position;
 
 	MvpDropEntry()
 	{

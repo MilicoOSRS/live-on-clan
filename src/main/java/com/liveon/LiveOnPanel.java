@@ -215,6 +215,7 @@ final class LiveOnPanel extends JPanel
 				String player = activity.player_name == null ? "" : activity.player_name;
 				String detail = activity.title == null ? "Atividade registrada" : activity.title;
 				String recordTime = "";
+				String mvpValue = "";
 				if ("CLAN_RECORD".equals(activity.type))
 				{
 					Matcher timeMatcher = RECORD_TIME_PATTERN.matcher(detail);
@@ -228,13 +229,23 @@ final class LiveOnPanel extends JPanel
 					detail = detail.replaceFirst("(?i)^novo melhor tempo\\s+em\\s+",
 						"Novo melhor tempo do clã em ");
 				}
+				else if ("MVP_LEADER".equals(activity.type) || "MVP_WINNER".equals(activity.type))
+				{
+					int valueSeparator = detail.lastIndexOf(" · ");
+					if (valueSeparator > 0 && valueSeparator + 3 < detail.length())
+					{
+						mvpValue = detail.substring(valueSeparator + 3).trim();
+						detail = detail.substring(0, valueSeparator).trim();
+					}
+				}
 				boolean collective = player.isEmpty();
 				boolean clanRecord = "CLAN_RECORD".equals(activity.type);
 				String key = activityKey(activity);
 				boolean expanded = expandedActivities.contains(key);
-				boolean expandable = (!collective && (player.length() > 22 || detail.length() > 29))
-					|| (collective && detail.length() > 50);
-				JPanel text = createActivityText(player, detail, recordTime, collective, clanRecord, expanded);
+				boolean expandable = activityNeedsExpansion(
+					player, detail, mvpValue, collective, clanRecord);
+				JPanel text = createActivityText(player, detail, recordTime, mvpValue,
+					collective, clanRecord, expanded);
 				int collapsedHeight = clanRecord ? 59 : 43;
 				int rowHeight = expanded ? Math.max(collapsedHeight, text.getPreferredSize().height + 10) : collapsedHeight;
 				row.setPreferredSize(new Dimension(210, rowHeight));
@@ -287,16 +298,17 @@ final class LiveOnPanel extends JPanel
 		}
 	}
 
-	private static JPanel createActivityText(String player, String detail, String recordTime,
+	private static JPanel createActivityText(String player, String detail, String recordTime, String mvpValue,
 		boolean collective, boolean clanRecord, boolean expanded)
 	{
 		JPanel text = new JPanel();
 		text.setOpaque(false);
 		text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
 		String timeSuffix = recordTime.isEmpty() ? "" : " · " + recordTime;
+		String valueSuffix = mvpValue.isEmpty() ? "" : " · " + mvpValue;
 		String tooltip = collective ? escapeHtml(detail + timeSuffix)
 			: "<html><b>" + escapeHtml(player) + "</b><br>"
-				+ escapeHtml(detail + timeSuffix) + "</html>";
+				+ escapeHtml(detail + timeSuffix + valueSuffix) + "</html>";
 		if (clanRecord && !recordTime.isEmpty())
 		{
 			JPanel heading = new JPanel(new BorderLayout(4, 0));
@@ -323,6 +335,27 @@ final class LiveOnPanel extends JPanel
 			text.add(bossLabel);
 			return text;
 		}
+		if (!collective && !mvpValue.isEmpty())
+		{
+			JPanel heading = new JPanel(new BorderLayout(4, 0));
+			heading.setOpaque(false);
+			heading.setAlignmentX(LEFT_ALIGNMENT);
+			JLabel name = new JLabel("<html><b>" + escapeHtml(abbreviate(player, 15)) + "</b></html>");
+			name.setToolTipText(tooltip);
+			heading.add(name, BorderLayout.CENTER);
+			JLabel value = new JLabel(mvpValue);
+			value.setForeground(new Color(235, 185, 45));
+			value.setToolTipText(tooltip);
+			heading.add(value, BorderLayout.EAST);
+			text.add(heading);
+
+			JLabel summary = expanded
+				? new JLabel("<html><div style='width:125px'>" + escapeHtml(detail) + "</div></html>")
+				: new JLabel(abbreviate(detail, 29));
+			summary.setToolTipText(tooltip);
+			text.add(summary);
+			return text;
+		}
 		if (expanded)
 		{
 			JLabel full = new JLabel("<html><div style='width:125px'>"
@@ -344,6 +377,25 @@ final class LiveOnPanel extends JPanel
 		summary.setToolTipText(tooltip);
 		text.add(summary);
 		return text;
+	}
+
+	static boolean activityNeedsExpansion(String player, String detail, String mvpValue,
+		boolean collective, boolean clanRecord)
+	{
+		if (collective)
+		{
+			return detail.length() > 50;
+		}
+		if (clanRecord)
+		{
+			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
+			return player.length() > 16 || boss.length() > 24;
+		}
+		if (!mvpValue.isEmpty())
+		{
+			return player.length() > 15 || detail.length() > 29;
+		}
+		return player.length() > 22 || detail.length() > 29;
 	}
 
 	private static String activityKey(RecentActivity activity)

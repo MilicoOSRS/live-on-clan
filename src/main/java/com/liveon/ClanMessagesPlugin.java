@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -65,13 +66,15 @@ import javax.swing.JOptionPane;
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
 import javax.swing.SwingUtilities;
-import net.runelite.client.events.NpcLootReceived;
+import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDependency;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.plugins.loottracker.LootTrackerConfig;
+import net.runelite.client.plugins.loottracker.LootTrackerPlugin;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -89,6 +92,7 @@ import net.runelite.http.api.loottracker.LootRecordType;
 
 @Slf4j
 @PluginDescriptor(name = "Live On Clan")
+@PluginDependency(LootTrackerPlugin.class)
 public class ClanMessagesPlugin extends Plugin
 {
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
@@ -104,7 +108,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern PET_COLLECTION_PATTERN = Pattern.compile(
 		"(?:New item added to your collection log|Collection log):\\s*(.+)", Pattern.CASE_INSENSITIVE);
 	private static final Pattern VALUABLE_DROP_PATTERN = Pattern.compile(
-		"(?:Valuable drop|Untradeable drop):\\s*(?:(\\d+)\\s*x\\s*)?(.+?)\\s*\\(([0-9,]+)\\s+coins?\\)\\s*\\.?$",
+		"(Valuable drop|Untradeable drop):\\s*(?:(\\d+)\\s*x\\s*)?(.+?)\\s*\\(([0-9,]+)\\s+coins?\\)\\s*\\.?$",
 		Pattern.CASE_INSENSITIVE);
 	private static final String PB_TEAM_SIZE = "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)";
 	private static final Pattern PB_KILLCOUNT_PATTERN = Pattern.compile(
@@ -249,7 +253,20 @@ public class ClanMessagesPlugin extends Plugin
 	private int bossStatisticsBoardScanTicks;
 	private final java.util.LinkedHashSet<Integer> bossStatisticsBoardGroupIds = new java.util.LinkedHashSet<>();
 	private final java.util.Map<String, PendingAllowlistedDrop> pendingAllowlistedDrops = new java.util.HashMap<>();
-	private final java.util.Map<String, Integer> recentAllowlistedLootTicks = new java.util.HashMap<>();
+	private final java.util.Map<String, Integer> recentAllowlistedLootTicks = boundedDropMap();
+	private final java.util.Map<String, Integer> recentLootItemIds = boundedDropMap();
+
+	private static <T> java.util.Map<String, T> boundedDropMap()
+	{
+		return new java.util.LinkedHashMap<String, T>()
+		{
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, T> eldest)
+			{
+				return size() > 128;
+			}
+		};
+	}
 
 	static final class PendingAllowlistedDrop
 	{
@@ -280,7 +297,8 @@ public class ClanMessagesPlugin extends Plugin
 		executor = Executors.newSingleThreadScheduledExecutor();
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
-		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey);
+		net.runelite.client.util.AsyncBufferedImage mvpDropIcon = itemManager.getImage(ItemID.COINS_10000);
+		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey, mvpDropIcon);
 		panel.setPbParticipationEnabled(config.pbRankingEnabled());
 		panel.setMvpParticipationEnabled(config.statsEnabled());
 		panel.clearRankDetails();
@@ -303,6 +321,7 @@ public class ClanMessagesPlugin extends Plugin
 		resetPendingPet();
 		pendingAllowlistedDrops.clear();
 		recentAllowlistedLootTicks.clear();
+		recentLootItemIds.clear();
 		if (pollingTask != null)
 		{
 			pollingTask.cancel(false);
@@ -667,9 +686,10 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onNpcLootReceived(NpcLootReceived event)
+	public void onServerNpcLoot(ServerNpcLoot event)
 	{
-		notifyDiscordDrop(event.getNpc().getName(), event.getItems(), "NPC", event.getNpc().getId());
+		String source = Text.removeTags(event.getComposition().getName());
+		notifyDiscordDrop(source, event.getItems(), "NPC", event.getComposition().getId());
 	}
 
 	@Subscribe
@@ -695,10 +715,18 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			long value = effectiveDropValue(item, items.size(), singleItemValueOverride);
 			totalValue += value;
-			String itemName = itemManager.getItemComposition(item.getId()).getName();
-			if (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName))
+			net.runelite.api.ItemComposition composition = itemManager.getItemComposition(item.getId());
+			String itemName = composition.getName();
+			String itemKey = normalizeDropFilterValue(itemName);
+			boolean specialValueItem = !composition.isTradeable()
+				|| matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
+			if (specialValueItem)
 			{
-				recentAllowlistedLootTicks.put(normalizeDropFilterValue(itemName), client.getTickCount());
+				recentLootItemIds.put(itemKey, item.getId());
+			}
+			if (specialValueItem && value > 0)
+			{
+				recentAllowlistedLootTicks.put(itemKey, client.getTickCount());
 			}
 		}
 		if (config.statsEnabled() && totalValue >= 1_000_000L)
@@ -726,7 +754,10 @@ public class ClanMessagesPlugin extends Plugin
 			String itemName = itemManager.getItemComposition(item.getId()).getName();
 			boolean denied = matchesDiscordFilter(DISCORD_ITEM_DENYLIST, itemName);
 			boolean allowed = matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
-			if (denied || (value < minimumValue && !allowed))
+			// An untradeable allowlisted item may have a zero GE price. Its game
+			// message supplies the real value shortly afterwards, so defer it to
+			// that path instead of sending a zero-value Discord duplicate.
+			if (denied || value <= 0 || (value < minimumValue && !allowed))
 			{
 				continue;
 			}
@@ -816,12 +847,13 @@ public class ClanMessagesPlugin extends Plugin
 		if (message == null) return null;
 		Matcher matcher = VALUABLE_DROP_PATTERN.matcher(message.replace('\u00A0', ' ').trim());
 		if (!matcher.find()) return null;
-		String itemName = matcher.group(2).trim();
-		if (!matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)) return null;
+		boolean untradeable = "Untradeable drop".equalsIgnoreCase(matcher.group(1));
+		String itemName = matcher.group(3).trim();
+		if (!untradeable && !matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)) return null;
 		try
 		{
-			int quantity = matcher.group(1) == null ? 1 : Integer.parseInt(matcher.group(1));
-			long totalValue = Long.parseLong(matcher.group(3).replace(",", ""));
+			int quantity = matcher.group(2) == null ? 1 : Integer.parseInt(matcher.group(2));
+			long totalValue = Long.parseLong(matcher.group(4).replace(",", ""));
 			return new PendingAllowlistedDrop(itemName, quantity, totalValue);
 		}
 		catch (NumberFormatException ignored)
@@ -887,6 +919,11 @@ public class ClanMessagesPlugin extends Plugin
 
 	private ItemStack resolveCollectionLogItem(String itemName)
 	{
+		Integer recentItemId = recentLootItemIds.get(normalizeDropFilterValue(itemName));
+		if (recentItemId != null)
+		{
+			return new ItemStack(recentItemId, 1);
+		}
 		for (net.runelite.http.api.item.ItemPrice candidate : itemManager.search(itemName))
 		{
 			if (candidate.getName() != null && candidate.getName().trim().equalsIgnoreCase(itemName))
@@ -1927,13 +1964,22 @@ public class ClanMessagesPlugin extends Plugin
 	private void submitDropStats(Collection<ItemStack> items, String source, Long singleItemValueOverride)
 	{
 		if (client.getLocalPlayer() == null) return;
-		List<Map<String, Object>> validDrops = new ArrayList<>();
+		Map<Integer, Long> quantitiesByItem = new LinkedHashMap<>();
 		for (ItemStack item : items)
 		{
-			long value = effectiveDropValue(item, items.size(), singleItemValueOverride);
+			if (item == null || item.getQuantity() <= 0) continue;
+			quantitiesByItem.merge(item.getId(), (long) item.getQuantity(), Long::sum);
+		}
+		List<Map<String, Object>> validDrops = new ArrayList<>();
+		for (Map.Entry<Integer, Long> item : quantitiesByItem.entrySet())
+		{
+			long quantity = item.getValue();
+			long value = singleItemValueOverride != null && quantitiesByItem.size() == 1
+				? Math.max(0L, singleItemValueOverride)
+				: (long) itemManager.getItemPrice(item.getKey()) * quantity;
 			if (value < 1_000_000L) continue;
 			Map<String, Object> validDrop = new LinkedHashMap<>();
-			validDrop.put("item", item.getQuantity() + "x " + itemManager.getItemComposition(item.getId()).getName());
+			validDrop.put("item", quantity + "x " + itemManager.getItemComposition(item.getKey()).getName());
 			validDrop.put("value", value);
 			validDrops.add(validDrop);
 		}
@@ -1941,13 +1987,20 @@ public class ClanMessagesPlugin extends Plugin
 		// Prepare payload; include playerName so server can verify via WOM
 		java.util.Map<String, Object> dropPayload = new java.util.LinkedHashMap<>();
 		dropPayload.put("playerName", client.getLocalPlayer().getName());
+		dropPayload.put("eventId", UUID.randomUUID().toString());
 		dropPayload.put("drops", validDrops);
 		dropPayload.put("source", source);
-		postJson("stats/drops", gson.toJson(dropPayload), new okhttp3.Callback()
+		submitDropPayload(gson.toJson(dropPayload), 0);
+	}
+
+	private void submitDropPayload(String payload, int attempt)
+	{
+		postJson("stats/drops", payload, new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
-				log.debug("Unable to submit drop statistics", exception);
+				log.debug("Unable to submit drop statistics (attempt {})", attempt + 1, exception);
+				scheduleDropRetry(payload, attempt);
 			}
 
 			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
@@ -1961,10 +2014,23 @@ public class ClanMessagesPlugin extends Plugin
 					else
 					{
 						log.debug("Drop statistics submission failed: {}", response.code());
+						if (response.code() == 429 || response.code() >= 500)
+						{
+							scheduleDropRetry(payload, attempt);
+						}
 					}
 				}
 			}
 		});
+	}
+
+	private void scheduleDropRetry(String payload, int attempt)
+	{
+		if (attempt >= 3) return;
+		ScheduledExecutorService currentExecutor = executor;
+		if (currentExecutor == null || currentExecutor.isShutdown()) return;
+		long delaySeconds = 1L << attempt;
+		currentExecutor.schedule(() -> submitDropPayload(payload, attempt + 1), delaySeconds, TimeUnit.SECONDS);
 	}
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
@@ -3168,7 +3234,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			return;
 		}
-		getJson("stats/mvp-drops", new okhttp3.Callback()
+		getMvpJson("stats/mvp-drops", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
@@ -3184,12 +3250,23 @@ public class ClanMessagesPlugin extends Plugin
 						log.debug("MVP drops fetch failed: {}", response.code());
 						return;
 					}
-					MvpDropEntry[] ranking = gson.fromJson(response.body().string(), MvpDropEntry[].class);
+					com.google.gson.JsonElement payload = gson.fromJson(
+						response.body().string(), com.google.gson.JsonElement.class);
+					MvpDropResponse result = new MvpDropResponse();
+					if (payload != null && payload.isJsonArray())
+					{
+						result.ranking = gson.fromJson(payload, MvpDropEntry[].class);
+					}
+					else if (payload != null && payload.isJsonObject())
+					{
+						result = gson.fromJson(payload, MvpDropResponse.class);
+					}
 					if (panel != null)
 					{
+						MvpDropEntry[] ranking = result == null ? null : result.ranking;
 						panel.setMvpDrops(ranking == null
 							? java.util.Collections.emptyList()
-							: java.util.Arrays.asList(ranking));
+							: java.util.Arrays.asList(ranking), result == null ? null : result.own);
 					}
 				}
 			}
@@ -3319,7 +3396,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			return;
 		}
-		getJson("stats/mvp-efficiency", new okhttp3.Callback()
+		getMvpJson("stats/mvp-efficiency", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
@@ -3335,17 +3412,49 @@ public class ClanMessagesPlugin extends Plugin
 						log.debug("MVP efficiency fetch failed: {}", response.code());
 						return;
 					}
-					MvpEfficiencyResponse rankings = gson.fromJson(
-						response.body().string(), MvpEfficiencyResponse.class);
+					com.google.gson.JsonObject payload = gson.fromJson(
+						response.body().string(), com.google.gson.JsonObject.class);
+					MvpEfficiencyResponse rankings = parseMvpEfficiencyResponse(payload);
 					if (panel != null && rankings != null)
 					{
+						MvpEfficiencyRanking ehb = rankings.ehb;
+						MvpEfficiencyRanking ehp = rankings.ehp;
 						panel.setMvpEfficiency(
-							rankings.ehb == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(rankings.ehb),
-							rankings.ehp == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(rankings.ehp));
+							ehb == null || ehb.ranking == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(ehb.ranking),
+							ehb == null ? null : ehb.own,
+							ehp == null || ehp.ranking == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(ehp.ranking),
+							ehp == null ? null : ehp.own);
 					}
 				}
 			}
 		});
+	}
+
+	private MvpEfficiencyResponse parseMvpEfficiencyResponse(com.google.gson.JsonObject payload)
+	{
+		if (payload == null)
+		{
+			return null;
+		}
+		MvpEfficiencyResponse response = new MvpEfficiencyResponse();
+		response.ehb = parseMvpEfficiencyRanking(payload.get("ehb"));
+		response.ehp = parseMvpEfficiencyRanking(payload.get("ehp"));
+		return response;
+	}
+
+	private MvpEfficiencyRanking parseMvpEfficiencyRanking(com.google.gson.JsonElement payload)
+	{
+		if (payload == null || payload.isJsonNull())
+		{
+			return null;
+		}
+		if (payload.isJsonArray())
+		{
+			MvpEfficiencyRanking ranking = new MvpEfficiencyRanking();
+			ranking.ranking = gson.fromJson(payload, MvpEfficiencyEntry[].class);
+			return ranking;
+		}
+		return payload.isJsonObject() ? gson.fromJson(payload, MvpEfficiencyRanking.class) : null;
 	}
 
 	private void fetchLives()
@@ -3979,6 +4088,7 @@ public class ClanMessagesPlugin extends Plugin
 			deliveredPinnedMessageIds.clear();
 			pendingAllowlistedDrops.clear();
 			recentAllowlistedLootTicks.clear();
+			recentLootItemIds.clear();
 			rankBankItems.clear();
 			rankBankItemIds.clear();
 			rankBankAccount = "";
@@ -4681,6 +4791,18 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			return;
 		}
 		okHttpClient.newCall(requestBuilder(base.newBuilder().addPathSegments(path).build()).get().build()).enqueue(callback);
+	}
+
+	private void getMvpJson(String path, okhttp3.Callback callback)
+	{
+		HttpUrl base = serverBaseUrl();
+		if (base == null)
+		{
+			panel.setStatus("URL inválida");
+			return;
+		}
+		HttpUrl url = base.newBuilder().addPathSegments(path).addQueryParameter("includeOwn", "1").build();
+		okHttpClient.newCall(requestBuilder(url).get().build()).enqueue(callback);
 	}
 
 	private Request.Builder requestBuilder(HttpUrl url)

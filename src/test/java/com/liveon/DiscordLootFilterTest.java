@@ -79,4 +79,19 @@ public class DiscordLootFilterTest
 		assertNull(ClanMessagesPlugin.allowlistedValuableDrop(
 			"Valuable drop: 1 x Big bones (4,000,000 coins)"));
 	}
+
+	@Test
+	public void extractsAnyUntradeableDropWithGameValue()
+	{
+		ClanMessagesPlugin.PendingAllowlistedDrop drop = ClanMessagesPlugin.allowlistedValuableDrop(
+			"Untradeable drop: Araxyte fang (18,400,000 coins)");
+		assertEquals("Araxyte fang", drop.itemName);
+		assertEquals(1, drop.quantity);
+		assertEquals(Long.valueOf(18_400_000L), drop.totalValue);
+
+		ClanMessagesPlugin.PendingAllowlistedDrop generic = ClanMessagesPlugin.allowlistedValuableDrop(
+			"Untradeable drop: Future untradeable reward (2,500,000 coins)");
+		assertEquals("Future untradeable reward", generic.itemName);
+		assertEquals(Long.valueOf(2_500_000L), generic.totalValue);
+	}
 }

@@ -2,6 +2,6 @@ package com.liveon;
 
 final class MvpEfficiencyResponse
 {
-	MvpEfficiencyEntry[] ehp;
-	MvpEfficiencyEntry[] ehb;
+	MvpEfficiencyRanking ehp;
+	MvpEfficiencyRanking ehb;
 }

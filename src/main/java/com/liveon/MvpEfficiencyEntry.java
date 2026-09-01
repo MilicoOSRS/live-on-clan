@@ -12,4 +12,5 @@ final class MvpEfficiencyEntry
 	private String accountType;
 	private double gained;
 	private MvpEfficiencyContribution[] breakdown;
+	private int position;
 }

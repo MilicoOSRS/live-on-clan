@@ -7,6 +7,7 @@ import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Rectangle;
 import javax.swing.BorderFactory;
+import javax.swing.Icon;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
@@ -54,7 +55,7 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JPanel accessTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel chatTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel staffTab = new JPanel(new BorderLayout(5, 5));
-	private final MvpPanel mvpTab = new MvpPanel();
+	private final MvpPanel mvpTab;
 	private final PbPanel pbTab;
 	private final RanksPanel ranksTab;
 	private final RankRequestsPanel rankRequestsTab;
@@ -78,9 +79,10 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JLabel connectionWarningLabel = new JLabel("", SwingConstants.CENTER);
 	private int connectionWarningAttempts;
 
-	ClanMessagesPanel(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable verifyTokenAction, Runnable clearMessagesAction, Runnable refreshRanksAction, Runnable resetRanksAction, Runnable requestRankAction, Runnable refreshRankRequestsAction, java.util.function.Consumer<Integer> deleteRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> confirmRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> declineRankRequestAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, Runnable refreshLivesAction, java.util.function.BiConsumer<String, String> saveLiveChannelAction, java.util.function.Consumer<LiveChannel> deleteLiveChannelAction, Runnable refreshMvpMembersAction, java.util.function.Consumer<String> saveMvpMemberAction, java.util.function.Consumer<MvpMember> deleteMvpMemberAction, Runnable refreshClanTagsAction, java.util.function.BiConsumer<String, String> createClanTagAction, java.util.function.BiConsumer<ClanTag, String> addClanTagMemberAction, java.util.function.Consumer<ClanTag> deleteClanTagAction, java.util.function.BiConsumer<ClanTag, ClanTagMember> removeClanTagMemberAction, Runnable refreshPbCategoriesAction, java.util.function.Consumer<PbCategory> selectPbCategoryAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction)
+	ClanMessagesPanel(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable verifyTokenAction, Runnable clearMessagesAction, Runnable refreshRanksAction, Runnable resetRanksAction, Runnable requestRankAction, Runnable refreshRankRequestsAction, java.util.function.Consumer<Integer> deleteRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> confirmRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> declineRankRequestAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, Runnable refreshLivesAction, java.util.function.BiConsumer<String, String> saveLiveChannelAction, java.util.function.Consumer<LiveChannel> deleteLiveChannelAction, Runnable refreshMvpMembersAction, java.util.function.Consumer<String> saveMvpMemberAction, java.util.function.Consumer<MvpMember> deleteMvpMemberAction, Runnable refreshClanTagsAction, java.util.function.BiConsumer<String, String> createClanTagAction, java.util.function.BiConsumer<ClanTag, String> addClanTagMemberAction, java.util.function.Consumer<ClanTag> deleteClanTagAction, java.util.function.BiConsumer<ClanTag, ClanTagMember> removeClanTagMemberAction, Runnable refreshPbCategoriesAction, java.util.function.Consumer<PbCategory> selectPbCategoryAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction, net.runelite.client.util.AsyncBufferedImage mvpDropIcon)
 	{
 		super(false);
+		mvpTab = new MvpPanel(mvpDropIcon);
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 		createAccessTab(verifyTokenAction);
@@ -882,7 +884,10 @@ final class ClanMessagesPanel extends PluginPanel
 	}
 	void clearMessages() { SwingUtilities.invokeLater(() -> messages.setText("")); }
 	void setPublishing(boolean value) { publish.setEnabled(!value); }
-	void setMvpDrops(java.util.List<MvpDropEntry> ranking) { mvpTab.updateDropRanking(ranking); }
+	void setMvpDrops(java.util.List<MvpDropEntry> ranking, MvpDropEntry own)
+	{
+		mvpTab.updateDropRanking(ranking, own);
+	}
 	void setMvpParticipationEnabled(boolean enabled) { mvpTab.setParticipationEnabled(enabled); }
 	void updatePbCategories(java.util.List<PbCategory> categories) { pbTab.updateCategories(categories); }
 	void beginPbRankingRequest(long generation) { pbTab.beginRankingRequest(generation); }
@@ -890,9 +895,10 @@ final class ClanMessagesPanel extends PluginPanel
 	void setPbRefreshEnabled(boolean enabled) { pbTab.setRefreshEnabled(enabled); }
 	void setPbParticipationEnabled(boolean enabled) { pbTab.setParticipationEnabled(enabled); }
 	PbCategory selectedPbCategory() { return pbTab.selectedCategory(); }
-	void setMvpEfficiency(java.util.List<MvpEfficiencyEntry> ehb, java.util.List<MvpEfficiencyEntry> ehp)
+	void setMvpEfficiency(java.util.List<MvpEfficiencyEntry> ehb, MvpEfficiencyEntry ownEhb,
+		java.util.List<MvpEfficiencyEntry> ehp, MvpEfficiencyEntry ownEhp)
 	{
-		mvpTab.updateEfficiencyRankings(ehb, ehp);
+		mvpTab.updateEfficiencyRankings(ehb, ownEhb, ehp, ownEhp);
 	}
 	void updateRanks(String playerName, String clanRank, javax.swing.Icon clanRankIcon,
 		String evaluatedRank, javax.swing.Icon evaluatedRankIcon,
