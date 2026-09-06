@@ -10,6 +10,7 @@ final class PbRankingResponse
 	int team_size;
 	String time_type;
 	int total;
+	boolean has_own_pbs;
 	List<Entry> ranking = Collections.emptyList();
 	Entry own;
 

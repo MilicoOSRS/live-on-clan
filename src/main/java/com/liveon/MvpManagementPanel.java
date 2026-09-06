@@ -31,6 +31,7 @@ final class MvpManagementPanel extends JPanel
 	MvpManagementPanel(Runnable refreshAction, Consumer<String> saveAction, Consumer<MvpMember> deleteAction)
 	{
 		setLayout(new BorderLayout(5, 5));
+		setMinimumSize(new java.awt.Dimension(0, 0));
 		setBorder(BorderFactory.createEmptyBorder(7, 7, 7, 7));
 
 		JPanel form = new JPanel(new GridLayout(0, 1, 3, 3));
@@ -45,7 +46,10 @@ final class MvpManagementPanel extends JPanel
 		add(form, BorderLayout.NORTH);
 
 		table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-		add(new JScrollPane(table), BorderLayout.CENTER);
+		JScrollPane tableScroll = new JScrollPane(table);
+		tableScroll.setMinimumSize(new java.awt.Dimension(0, 0));
+		tableScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		add(tableScroll, BorderLayout.CENTER);
 
 		JButton refresh = new JButton("Atualizar");
 		refresh.addActionListener(event -> refreshAction.run());

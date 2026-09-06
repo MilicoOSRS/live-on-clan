@@ -17,6 +17,12 @@ final class MvpDropEntry
 	@SerializedName("account_type")
 	private String accountType;
 	private int position;
+	private transient int positionChange;
+
+	void setPositionChange(int positionChange)
+	{
+		this.positionChange = positionChange;
+	}
 
 	MvpDropEntry()
 	{

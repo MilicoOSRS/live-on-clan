@@ -14,7 +14,6 @@ import java.util.function.Consumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
-import javax.swing.ButtonGroup;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
@@ -25,7 +24,6 @@ import javax.swing.JScrollPane;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
-import javax.swing.JToggleButton;
 
 final class PbPanel extends JPanel
 {
@@ -46,7 +44,7 @@ final class PbPanel extends JPanel
 	private final List<PbCategory> availableCategories = new ArrayList<>();
 	private final JPanel ranking = new VerticalRankingPanel();
 	private final JScrollPane rankingScroll = new JScrollPane(ranking);
-	private final JLabel ownPb = new JLabel("Nenhum PB sincronizado", SwingConstants.CENTER);
+	private final JLabel ownPb = new JLabel("Selecione uma raid ou boss", SwingConstants.CENTER);
 	private final JPanel tutorial = new JPanel();
 	private final JButton tutorialToggle = new JButton("▾ Como registrar seus PBs?");
 	private final JPanel participationNotice = new JPanel(new BorderLayout());
@@ -54,6 +52,7 @@ final class PbPanel extends JPanel
 	private final Consumer<PbCategory> selectionAction;
 	private boolean updatingFilters;
 	private boolean updatingGlobalSearch;
+	private boolean hasRegisteredPb;
 	private volatile long latestRankingRequestGeneration;
 
 	PbPanel(Runnable refreshAction, Consumer<PbCategory> selectionAction)
@@ -65,9 +64,6 @@ final class PbPanel extends JPanel
 		JPanel top = new JPanel();
 		top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
 		configureTutorial();
-		top.add(tutorialToggle);
-		top.add(tutorial);
-		top.add(Box.createVerticalStrut(7));
 		configureParticipationNotice();
 		top.add(participationNotice);
 		top.add(Box.createVerticalStrut(7));
@@ -195,6 +191,11 @@ final class PbPanel extends JPanel
 		rankingScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
 		add(rankingScroll, BorderLayout.CENTER);
 
+		JPanel footer = new JPanel();
+		footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
+		footer.add(tutorialToggle);
+		footer.add(tutorial);
+		add(footer, BorderLayout.SOUTH);
 	}
 
 	private void configureParticipationNotice()
@@ -217,20 +218,6 @@ final class PbPanel extends JPanel
 			participationNotice.setVisible(!enabled);
 			participationNotice.getParent().revalidate();
 			participationNotice.getParent().repaint();
-		});
-	}
-
-	private static void configureFittedButton(javax.swing.AbstractButton button, String text)
-	{
-		button.setText(text);
-		button.setToolTipText(text);
-		button.addComponentListener(new java.awt.event.ComponentAdapter()
-		{
-			@Override
-			public void componentResized(java.awt.event.ComponentEvent event)
-			{
-				fitButtonText(button, text);
-			}
 		});
 	}
 
@@ -428,7 +415,7 @@ final class PbPanel extends JPanel
 			BorderFactory.createMatteBorder(0, 3, 0, 0, BLUE),
 			BorderFactory.createEmptyBorder(6, 8, 6, 5)));
 		JLabel instructions = new JLabel("<html><div style='width:160px'>"
-			+ "1. Abra o <b>Adventure Log</b> da sua POH para importar todos os seus tempos.<br><br>"
+			+ "1. Abra o <b>Adventure Log</b> da sua POH e selecione <b>Counters</b> para importar todos os seus tempos.<br><br>"
 			+ "2. Nos <b>Combat Achievements</b>, abra a página do boss que quiser registrar.<br><br>"
 			+ "3. Scoreboards também são reconhecidos.<br><br>"
 			+ "Com <b>Participar do ranking de PBs</b> ativado, seus novos PBs serão registrados automaticamente."
@@ -478,8 +465,8 @@ final class PbPanel extends JPanel
 		{
 			ranking.removeAll();
 			ranking.add(centered("Nenhum PB sincronizado nesta categoria."));
-			setTutorialExpanded(true);
-			ownPb.setText("<html><div style='text-align:center'>Abra o Adventure Log<br>para importar seus PBs</div></html>");
+			if (!hasRegisteredPb) setTutorialExpanded(true);
+			ownPb.setText("<html><div style='text-align:center'>Abra o Adventure Log e selecione<br>Counters para importar seus PBs</div></html>");
 			ranking.revalidate();
 			ranking.repaint();
 		}
@@ -635,7 +622,7 @@ final class PbPanel extends JPanel
 			case "levi": case "the leviathan": case "levi awakened": case "leviathan awakened": case "the leviathan awakened": return "the leviathan";
 			case "vard": case "vard awakened": case "vardorvis awakened": return "vardorvis";
 			case "wisp": case "whisp": case "the whisperer": case "wisp awakened": case "whisp awakened": case "whisperer awakened": return "the whisperer";
-			case "sol": case "colo": case "colosseum": case "fortis colosseum": return "sol heredit";
+			case "sol": case "sol heredit": case "colo": case "colosseum": case "fortis colosseum": return "fortis colosseum";
 			case "barrows": return "barrows chests";
 			case "lunar chests": case "moons of peril": case "perilous moon": case "perilous moons": return "lunar chest";
 			default: return query;
@@ -698,6 +685,11 @@ final class PbPanel extends JPanel
 	{
 		SwingUtilities.invokeLater(() -> {
 			if (generation != latestRankingRequestGeneration) return;
+			if (response.has_own_pbs || response.own != null)
+			{
+				hasRegisteredPb = true;
+				setTutorialExpanded(false);
+			}
 			ranking.removeAll();
 			List<PbRankingResponse.Entry> values = response.ranking == null
 				? new ArrayList<>() : response.ranking;

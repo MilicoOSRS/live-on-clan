@@ -97,6 +97,17 @@ public interface ClanMessagesConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "eventOverlayEnabled",
+		name = "Eventos",
+		description = "Exibe o pequeno overlay com os dados e o recado do evento",
+		position = 7
+	)
+	default boolean eventOverlayEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "discordDropMinimumValue",
 		name = "Valor minimo do drop",
 		description = "Valor GE minimo para publicar um drop",

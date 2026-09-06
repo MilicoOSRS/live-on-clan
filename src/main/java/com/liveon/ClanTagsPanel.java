@@ -42,10 +42,13 @@ final class ClanTagsPanel extends JPanel
 		BiConsumer<ClanTag, ClanTagMember> removeMemberAction)
 	{
 		setLayout(new BorderLayout(5, 5));
+		setMinimumSize(new java.awt.Dimension(0, 0));
 		setBorder(BorderFactory.createEmptyBorder(7, 7, 7, 7));
 
 		JPanel forms = new JPanel(new GridLayout(0, 1, 3, 3));
+		forms.setMinimumSize(new java.awt.Dimension(0, 0));
 		JPanel createForm = new JPanel(new GridLayout(0, 1, 3, 3));
+		createForm.setMinimumSize(new java.awt.Dimension(0, 0));
 		createForm.setBorder(BorderFactory.createTitledBorder("Criar etiqueta"));
 		createForm.add(new JLabel("Sigla (máximo 5 caracteres)"));
 		createForm.add(code);
@@ -57,6 +60,7 @@ final class ClanTagsPanel extends JPanel
 		createForm.add(create);
 
 		JPanel memberForm = new JPanel(new GridLayout(0, 1, 3, 3));
+		memberForm.setMinimumSize(new java.awt.Dimension(0, 0));
 		memberForm.setBorder(BorderFactory.createTitledBorder("Adicionar membro"));
 		memberForm.add(new JLabel("Etiqueta"));
 		memberForm.add(tag);
@@ -76,7 +80,11 @@ final class ClanTagsPanel extends JPanel
 		add(forms, BorderLayout.NORTH);
 
 		table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-		add(new JScrollPane(table), BorderLayout.CENTER);
+		table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
+		JScrollPane tableScroll = new JScrollPane(table);
+		tableScroll.setMinimumSize(new java.awt.Dimension(0, 0));
+		tableScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		add(tableScroll, BorderLayout.CENTER);
 
 		JButton refresh = new JButton("Atualizar");
 		refresh.addActionListener(event -> refreshAction.run());

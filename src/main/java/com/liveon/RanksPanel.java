@@ -445,22 +445,6 @@ final class RanksPanel extends JPanel
 		return next.substring(0, 1).toUpperCase(Locale.ROOT) + next.substring(1);
 	}
 
-	private static String requirementsDescription(String rank)
-	{
-		switch (normalize(rank))
-		{
-			case "cabo": return "Necessário: 200 Quest points e Fire cape.";
-			case "aluno": return "Necessário: 250 Quest points, Fire cape e Easy Combat Achievements.";
-			case "sargento": return "Necessário: 300 Quest points, Fire cape e Medium Combat Achievements.";
-			case "cadete": return "Necessário: Quest cape, Fire cape e Hard Combat Achievements.";
-			case "tenente": return "Necessário: Quest cape, Dizana's quiver ou Infernal cape e Elite Combat Achievements.";
-			case "capitão": return "Necessário: Diary cape, Dizana's quiver, Infernal cape e Master Combat Achievements.";
-			case "major": return "Necessário: requisitos de Capitão e 2300 total level.";
-			case "coronel": return "Necessário: Diary cape, Max cape e Grandmaster Combat Achievements.";
-			default: return "Verifique os requisitos pendentes antes de solicitar.";
-		}
-	}
-
 	private static boolean isNormalRank(String rankName)
 	{
 		return progressionIndex(rankName) >= 0 || normalize(rankName).contains("não identificado")

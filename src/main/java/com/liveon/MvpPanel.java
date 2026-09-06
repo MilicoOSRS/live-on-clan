@@ -17,10 +17,17 @@ import java.awt.event.MouseEvent;
 import java.time.YearMonth;
 import java.time.format.TextStyle;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -36,6 +43,7 @@ import javax.swing.JTabbedPane;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import net.runelite.client.plugins.hiscore.HiscorePlugin;
+import net.runelite.client.RuneLite;
 import net.runelite.client.util.ImageUtil;
 
 final class MvpPanel extends JPanel
@@ -63,6 +71,10 @@ final class MvpPanel extends JPanel
 	private List<MvpDropEntry> liveRanking = Collections.emptyList();
 	private MvpDropEntry liveOwnDrop;
 	private String expandedDropPlayer;
+	private final Properties positionCache = new Properties();
+	private boolean positionCacheLoaded;
+	private boolean positionCacheDirty;
+	private String positionCacheMonth;
 
 	MvpPanel(net.runelite.client.util.AsyncBufferedImage dropIcon)
 	{
@@ -270,7 +282,7 @@ final class MvpPanel extends JPanel
 
 	private static String monthLabel()
 	{
-		YearMonth month = YearMonth.now();
+		YearMonth month = clanMonth();
 		String name = month.getMonth().getDisplayName(TextStyle.FULL, new Locale("pt", "BR"));
 		return name.substring(0, 1).toUpperCase(new Locale("pt", "BR")) + name.substring(1) + " de " + month.getYear();
 	}
@@ -279,6 +291,7 @@ final class MvpPanel extends JPanel
 	{
 		liveRanking = ranking == null ? Collections.emptyList() : new ArrayList<>(ranking);
 		liveOwnDrop = own;
+		applyDropPositionChanges(liveRanking, own);
 		renderDropRanking(liveRanking, own);
 	}
 
@@ -321,12 +334,7 @@ final class MvpPanel extends JPanel
 				}
 				if (topTen.size() > 3)
 				{
-					JLabel classification = new JLabel("CLASSIFICAÇÃO");
-					classification.setForeground(new Color(155, 155, 155));
-					classification.setFont(SECTION_FONT);
-					classification.setBorder(BorderFactory.createEmptyBorder(0, 4, 6, 0));
-					classification.setAlignmentX(Component.LEFT_ALIGNMENT);
-					dropEntries.add(classification);
+					addRankingDivider(dropEntries);
 					for (int index = 3; index < topTen.size(); index++)
 					{
 						dropEntries.add(createDropListRow(index + 1, topTen.get(index), leaderValue));
@@ -343,6 +351,8 @@ final class MvpPanel extends JPanel
 	synchronized void updateEfficiencyRankings(List<MvpEfficiencyEntry> ehb, MvpEfficiencyEntry ownEhb,
 		List<MvpEfficiencyEntry> ehp, MvpEfficiencyEntry ownEhp)
 	{
+		applyEfficiencyPositionChanges("ehb", ehb, ownEhb);
+		applyEfficiencyPositionChanges("ehp", ehp, ownEhp);
 		renderEfficiencyRanking(ehbEntries, ehb, ownEhb, "EHB");
 		renderEfficiencyRanking(ehpEntries, ehp, ownEhp, "EHP");
 	}
@@ -383,12 +393,7 @@ final class MvpPanel extends JPanel
 				}
 				if (topTen.size() > 3)
 				{
-					JLabel classification = new JLabel("CLASSIFICAÇÃO");
-					classification.setForeground(new Color(155, 155, 155));
-					classification.setFont(SECTION_FONT);
-					classification.setBorder(BorderFactory.createEmptyBorder(0, 4, 6, 0));
-					classification.setAlignmentX(Component.LEFT_ALIGNMENT);
-					target.add(classification);
+					addRankingDivider(target);
 					for (int index = 3; index < topTen.size(); index++)
 					{
 						target.add(createEfficiencyListRow(index + 1, topTen.get(index)));
@@ -418,6 +423,7 @@ final class MvpPanel extends JPanel
 		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 20f));
 		crown.setForeground(GOLD);
 		crown.setPreferredSize(new Dimension(25, 30));
+		applyLeaderPositionChange(crown, entry.getPositionChange());
 		row.add(crown, BorderLayout.WEST);
 		JLabel name = new JLabel(entry.getPlayerName());
 		applyAccountIcon(name, entry.getAccountType());
@@ -499,6 +505,7 @@ final class MvpPanel extends JPanel
 		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 61));
 		JLabel place = new JLabel(position + "º");
 		stylePositionLabel(place);
+		applyPositionChange(place, entry.getPositionChange());
 		JLabel name = new JLabel(shortName(entry.getPlayerName(), 15));
 		name.setToolTipText(entry.getPlayerName());
 		applyAccountIcon(name, entry.getAccountType());
@@ -525,6 +532,7 @@ final class MvpPanel extends JPanel
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
 		JLabel place = new JLabel(Integer.toString(position), SwingConstants.CENTER);
 		stylePositionLabel(place);
+		applyPositionChange(place, entry.getPositionChange());
 		JLabel name = new JLabel(entry.getPlayerName());
 		name.setToolTipText(entry.getPlayerName());
 		applyAccountIcon(name, entry.getAccountType());
@@ -567,6 +575,7 @@ final class MvpPanel extends JPanel
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
 		JLabel place = new JLabel(Integer.toString(entry.getPosition()), SwingConstants.CENTER);
 		stylePositionLabel(place);
+		applyPositionChange(place, entry.getPositionChange());
 		JLabel name = new JLabel(entry.getPlayerName());
 		name.setToolTipText(entry.getPlayerName());
 		applyAccountIcon(name, entry.getAccountType());
@@ -633,12 +642,151 @@ final class MvpPanel extends JPanel
 		target.add(label);
 	}
 
+	private synchronized void applyDropPositionChanges(List<MvpDropEntry> ranking, MvpDropEntry own)
+	{
+		if ((ranking == null || ranking.isEmpty()) && own == null) return;
+		loadPositionCache();
+		if (ranking != null)
+		{
+			for (MvpDropEntry entry : ranking) applyPositionChange("drops", entry.getPlayerName(),
+				entry.getPosition(), entry::setPositionChange);
+		}
+		if (own != null) applyPositionChange("drops", own.getPlayerName(), own.getPosition(), own::setPositionChange);
+		savePositionCache();
+	}
+
+	private synchronized void applyEfficiencyPositionChanges(String rankingType,
+		List<MvpEfficiencyEntry> ranking, MvpEfficiencyEntry own)
+	{
+		if ((ranking == null || ranking.isEmpty()) && own == null) return;
+		loadPositionCache();
+		if (ranking != null)
+		{
+			for (MvpEfficiencyEntry entry : ranking) applyPositionChange(rankingType, entry.getPlayerName(),
+				entry.getPosition(), entry::setPositionChange);
+		}
+		if (own != null) applyPositionChange(rankingType, own.getPlayerName(), own.getPosition(), own::setPositionChange);
+		savePositionCache();
+	}
+
+	private void applyPositionChange(String rankingType, String playerName, int currentPosition,
+		java.util.function.IntConsumer setter)
+	{
+		if (currentPosition <= 0 || playerName == null) return;
+		String key = positionCacheMonth + "." + rankingType + "." + normalizePlayer(playerName);
+		int previous = parseCachedInt(positionCache.getProperty(key + ".position"));
+		int change = previous > 0 && previous != currentPosition
+			? previous - currentPosition : parseCachedInt(positionCache.getProperty(key + ".change"));
+		if (previous <= 0) change = 0;
+		if (previous != currentPosition
+			|| change != parseCachedInt(positionCache.getProperty(key + ".change")))
+		{
+			positionCache.setProperty(key + ".position", Integer.toString(currentPosition));
+			positionCache.setProperty(key + ".change", Integer.toString(change));
+			positionCacheDirty = true;
+		}
+		setter.accept(change);
+	}
+
+	private void loadPositionCache()
+	{
+		String month = clanMonth().toString();
+		if (positionCacheLoaded && month.equals(positionCacheMonth)) return;
+		positionCacheMonth = month;
+		if (positionCacheLoaded)
+		{
+			positionCache.clear();
+			positionCacheDirty = true;
+			return;
+		}
+		positionCacheLoaded = true;
+		Path file = positionCacheFile();
+		if (!Files.isRegularFile(file)) return;
+		try (InputStream input = Files.newInputStream(file))
+		{
+			positionCache.load(input);
+			positionCacheDirty = positionCache.keySet().removeIf(key -> !key.toString().startsWith(month + "."));
+		}
+		catch (IOException ignored)
+		{
+			positionCache.clear();
+		}
+	}
+
+	private void savePositionCache()
+	{
+		if (!positionCacheDirty) return;
+		Path file = positionCacheFile();
+		Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
+		try
+		{
+			Files.createDirectories(file.getParent());
+			try (OutputStream output = Files.newOutputStream(temporary))
+			{
+				positionCache.store(output, "Live On MVP ranking positions");
+			}
+			Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
+			positionCacheDirty = false;
+		}
+		catch (IOException ignored)
+		{
+			// Ranking display continues normally when the optional cache cannot be saved.
+		}
+	}
+
+	private static Path positionCacheFile()
+	{
+		return RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan").resolve("mvp-positions.properties");
+	}
+
+	private static YearMonth clanMonth()
+	{
+		return YearMonth.now(java.time.ZoneId.of("America/Sao_Paulo"));
+	}
+
+	private static int parseCachedInt(String value)
+	{
+		try { return value == null ? 0 : Integer.parseInt(value); }
+		catch (NumberFormatException ignored) { return 0; }
+	}
+
 	private static void stylePositionLabel(JLabel label)
 	{
 		label.setHorizontalAlignment(SwingConstants.CENTER);
 		label.setForeground(new Color(175, 175, 175));
 		label.setFont(POSITION_FONT);
 		label.setPreferredSize(new Dimension(30, 20));
+	}
+
+	private static void applyPositionChange(JLabel label, int change)
+	{
+		if (change == 0) return;
+		String color = change > 0 ? "#7ED957" : "#E06C75";
+		String arrow = change > 0 ? "▲" : "▼";
+		label.setText("<html><div style='text-align:center'>" + label.getText() + "<br><font color='" + color + "'>"
+			+ arrow + " " + Math.abs(change) + "</font></div></html>");
+		int width = Math.max(30, label.getFontMetrics(POSITION_FONT).stringWidth(arrow + " " + Math.abs(change)) + 2);
+		label.setPreferredSize(new Dimension(width, 32));
+	}
+
+	private static void applyLeaderPositionChange(JLabel label, int change)
+	{
+		if (change == 0) return;
+		String color = change > 0 ? "#7ED957" : "#E06C75";
+		String arrow = change > 0 ? "▲" : "▼";
+		label.setText("<html><div style='text-align:center'>♛<br><font color='" + color + "'>"
+			+ arrow + Math.abs(change) + "</font></div></html>");
+		label.setPreferredSize(new Dimension(34, 38));
+	}
+
+	private static void addRankingDivider(JPanel target)
+	{
+		javax.swing.JSeparator separator = new javax.swing.JSeparator();
+		separator.setForeground(new Color(72, 72, 72));
+		separator.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+		separator.setAlignmentX(Component.LEFT_ALIGNMENT);
+		target.add(separator);
+		target.add(Box.createVerticalStrut(7));
 	}
 
 	private static String shortName(String value, int length)
@@ -715,6 +863,7 @@ final class MvpPanel extends JPanel
 		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 20f));
 		crown.setForeground(GOLD);
 		crown.setPreferredSize(new Dimension(25, 30));
+		applyLeaderPositionChange(crown, entry.getPositionChange());
 		card.add(crown, BorderLayout.WEST);
 		JLabel name = new JLabel(entry.getPlayerName());
 		applyAccountIcon(name, entry.getAccountType());
@@ -756,12 +905,13 @@ final class MvpPanel extends JPanel
 		card.setBackground(background);
 		card.setBorder(BorderFactory.createMatteBorder(0, 3, 0, 0, accent));
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 156 : 61));
+		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 173 : 61));
 		JPanel summary = new JPanel(new BorderLayout(7, 0));
 		summary.setBackground(background);
 		summary.setBorder(BorderFactory.createEmptyBorder(7, 8, 7, 8));
 		JLabel place = new JLabel(position + "º");
 		stylePositionLabel(place);
+		applyPositionChange(place, entry.getPositionChange());
 		JLabel name = clickableDropName(entry, 16, 15f);
 		name.setForeground(new Color(225, 225, 225));
 		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
@@ -794,13 +944,14 @@ final class MvpPanel extends JPanel
 		wrapper.setBackground(groupBackground);
 		wrapper.setBorder(BorderFactory.createMatteBorder(0, 2, 0, 0, new Color(82, 82, 82)));
 		wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
-		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 151 : 56));
+		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 168 : 56));
 		JPanel row = new JPanel(new BorderLayout(7, 0));
 		row.setBackground(groupBackground);
 		row.setBorder(BorderFactory.createEmptyBorder(9, 5, 9, 7));
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
 		JLabel place = new JLabel(Integer.toString(position), SwingConstants.CENTER);
 		stylePositionLabel(place);
+		applyPositionChange(place, entry.getPositionChange());
 		JLabel name = clickableDropName(entry, 16, 15f);
 		name.setForeground(new Color(225, 225, 225));
 		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
@@ -874,12 +1025,19 @@ final class MvpPanel extends JPanel
 
 	private static JPanel createInlineDropDetails(MvpDropEntry entry, Color background, int leftPadding)
 	{
-		JPanel panel = new JPanel(new BorderLayout());
+		JPanel panel = new JPanel();
+		panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
 		panel.setBackground(background);
 		panel.setBorder(BorderFactory.createEmptyBorder(7, leftPadding, 8, 5));
 		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 95));
-		panel.add(leftPinnedDropDetails(entry), BorderLayout.WEST);
+		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 112));
+		JLabel hint = new JLabel("3 maiores drops");
+		hint.setFont(META_FONT);
+		hint.setForeground(new Color(155, 155, 155));
+		hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+		panel.add(hint);
+		panel.add(Box.createVerticalStrut(4));
+		panel.add(leftPinnedDropDetails(entry));
 		return panel;
 	}
 
