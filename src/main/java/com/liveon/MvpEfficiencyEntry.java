@@ -13,4 +13,10 @@ final class MvpEfficiencyEntry
 	private double gained;
 	private MvpEfficiencyContribution[] breakdown;
 	private int position;
+	private transient int positionChange;
+
+	void setPositionChange(int positionChange)
+	{
+		this.positionChange = positionChange;
+	}
 }

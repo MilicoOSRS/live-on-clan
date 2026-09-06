@@ -62,7 +62,6 @@ import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.events.ConfigChanged;
-import javax.swing.JOptionPane;
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
 import javax.swing.SwingUtilities;
@@ -78,6 +77,7 @@ import net.runelite.client.plugins.loottracker.LootTrackerPlugin;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.Notifier;
 import net.runelite.client.util.LinkBrowser;
 import net.runelite.client.util.Text;
@@ -110,6 +110,10 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern VALUABLE_DROP_PATTERN = Pattern.compile(
 		"(Valuable drop|Untradeable drop):\\s*(?:(\\d+)\\s*x\\s*)?(.+?)\\s*\\(([0-9,]+)\\s+coins?\\)\\s*\\.?$",
 		Pattern.CASE_INSENSITIVE);
+	private static final Pattern CLAN_DROP_PATTERN = Pattern.compile(
+		"^(?<player>.+?) (?<kind>received a drop|received a valuable drop|received special loot from a raid|received a new collection log item): "
+			+ "(?:(?<quantity>[0-9,]+) x )?(?<item>.+?)(?: \\((?<value>[0-9,]+) coins?\\))?\\.?$",
+		Pattern.CASE_INSENSITIVE);
 	private static final String PB_TEAM_SIZE = "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)";
 	private static final Pattern PB_KILLCOUNT_PATTERN = Pattern.compile(
 		"Your (?<pre>completion count for |subdued |completed )?(?<boss>.+?) (?<post>(?:(?:kill|harvest|lap|completion|success|Total Ticket) )?(?:count )?)is: ?(?<kc>[0-9,]+)",
@@ -140,6 +144,8 @@ public class ClanMessagesPlugin extends Plugin
 		"enhanced crystal weapon seed",
 		"crystal armour seed",
 		"mokhaiotl cloth",
+		"sanguine dust",
+		"metamorphic dust",
 		"venator vestige",
 		"ultor vestige",
 		"bellator vestige",
@@ -184,6 +190,7 @@ public class ClanMessagesPlugin extends Plugin
 	@Inject private ClanMessagesConfig config;
 	@Inject private ConfigManager configManager;
 	@Inject private Notifier notifier;
+	@Inject private OverlayManager overlayManager;
 
 	private ScheduledExecutorService executor;
 	private ClanMessagesPanel panel;
@@ -205,6 +212,10 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Map<String, String> messageCursorByAccount = new java.util.concurrent.ConcurrentHashMap<>();
 	private String lastClearMarker = "";
 	private final AtomicBoolean messageFetchInFlight = new AtomicBoolean(false);
+	private final AtomicBoolean eventOverlayFetchInFlight = new AtomicBoolean(false);
+	private volatile EventOverlayState eventOverlayState = new EventOverlayState();
+	private ClanEventOverlay eventOverlay;
+	private ManualBingoClient manualBingo;
 	private final AtomicBoolean pbCategoriesFetchInFlight = new AtomicBoolean(false);
 	private final AtomicLong pbRankingRequestGeneration = new AtomicLong();
 	private final AtomicBoolean rankRequestsFetchInFlight = new AtomicBoolean(false);
@@ -213,7 +224,7 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> sessionRankNotifications = java.util.concurrent.ConcurrentHashMap.newKeySet();
-	private boolean isStaff = false;
+	private volatile boolean isStaff = false;
 	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
 	private volatile String authenticatedPlayerName = "";
@@ -255,6 +266,11 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Map<String, PendingAllowlistedDrop> pendingAllowlistedDrops = new java.util.HashMap<>();
 	private final java.util.Map<String, Integer> recentAllowlistedLootTicks = boundedDropMap();
 	private final java.util.Map<String, Integer> recentLootItemIds = boundedDropMap();
+	private final java.util.Map<String, Integer> recentDetectedDrops = boundedDropMap();
+	private static final int DROP_DEDUP_TICKS = 8;
+	private String lastLootCountSource = "";
+	private int lastLootCount = -1;
+	private int lastLootCountTick = -1000;
 
 	private static <T> java.util.Map<String, T> boundedDropMap()
 	{
@@ -281,6 +297,27 @@ public class ClanMessagesPlugin extends Plugin
 			this.totalValue = totalValue;
 		}
 	}
+
+	static final class BingoDrop
+	{
+		final String itemName;
+		final int quantity;
+		final Long totalValue;
+		final Integer itemId;
+		final String source;
+		final String category;
+
+		private BingoDrop(String itemName, int quantity, Long totalValue, Integer itemId,
+			String source, String category)
+		{
+			this.itemName = itemName;
+			this.quantity = Math.max(1, quantity);
+			this.totalValue = totalValue;
+			this.itemId = itemId;
+			this.source = source;
+			this.category = category;
+		}
+	}
 	private ScheduledFuture<?> rankRequestsPollingTask;
 	private ScheduledFuture<?> mvpDropsPollingTask;
 	// If true, the user manually disconnected and auto-verification should be paused until they click Verify
@@ -297,9 +334,21 @@ public class ClanMessagesPlugin extends Plugin
 		executor = Executors.newSingleThreadScheduledExecutor();
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
+		eventOverlay = new ClanEventOverlay(this);
+		overlayManager.add(eventOverlay);
 		net.runelite.client.util.AsyncBufferedImage mvpDropIcon = itemManager.getImage(ItemID.COINS_10000);
-		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey, mvpDropIcon);
+		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::saveEventOverlay, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey, mvpDropIcon);
+		manualBingo = new ManualBingoClient(gson, panel,
+			() -> config.enabled() ? authenticatedPlayerName : "", () -> isStaff && hasStaffAccessKey(),
+			() -> isDeputyOwner, (path, body) -> {
+				HttpUrl base = serverBaseUrl();
+				if (base == null) return null;
+				Request.Builder request = requestBuilder(base.newBuilder().addPathSegments(path).build());
+				if (body == null) request.get(); else request.post(RequestBody.create(JSON, body));
+				return okHttpClient.newCall(request.build());
+			});
 		panel.setPbParticipationEnabled(config.pbRankingEnabled());
+
 		panel.setMvpParticipationEnabled(config.statsEnabled());
 		panel.clearRankDetails();
 		if (config.enabled())
@@ -318,10 +367,16 @@ public class ClanMessagesPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		connectionSessionGeneration.incrementAndGet();
+		if (manualBingo != null) { manualBingo.close(); manualBingo = null; }
 		resetPendingPet();
 		pendingAllowlistedDrops.clear();
 		recentAllowlistedLootTicks.clear();
 		recentLootItemIds.clear();
+		recentDetectedDrops.clear();
+		lastLootCountSource = "";
+		lastLootCount = -1;
+		lastLootCountTick = -1000;
 		if (pollingTask != null)
 		{
 			pollingTask.cancel(false);
@@ -342,6 +397,11 @@ public class ClanMessagesPlugin extends Plugin
 		if (navigationButton != null)
 		{
 			clientToolbar.removeNavigation(navigationButton);
+		}
+		if (eventOverlay != null)
+		{
+			overlayManager.remove(eventOverlay);
+			eventOverlay = null;
 		}
 		if (clanLiveBadgeDecorator != null)
 		{
@@ -365,6 +425,7 @@ public class ClanMessagesPlugin extends Plugin
 		mvpMembers.clear();
 		clanTagsByPlayer.clear();
 		knownClanTagMarkup.clear();
+		eventOverlayState = new EventOverlayState();
 		panel = null;
 	}
 
@@ -502,22 +563,47 @@ public class ClanMessagesPlugin extends Plugin
 		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
 		if (event.getType() == ChatMessageType.GAMEMESSAGE)
 		{
+			rememberLootCount(message);
 			if (isPbParticipationEnabled())
 			{
 				capturePersonalBest(event.getMessage(), message);
 			}
-			PendingAllowlistedDrop valuableDrop = allowlistedValuableDrop(message);
+			PendingAllowlistedDrop valuableDrop = parsedValuableDrop(message);
+			if (valuableDrop != null
+				&& !message.toLowerCase(java.util.Locale.ROOT).startsWith("untradeable drop:")
+				&& !matchesDiscordFilter(DROP_ITEM_ALLOWLIST, valuableDrop.itemName)
+				&& !(valuableDrop.totalValue != null && config.statsEnabled()
+					&& valuableDrop.totalValue >= 1_000_000L)
+				&& !(valuableDrop.totalValue != null && config.discordDropsEnabled()
+					&& valuableDrop.totalValue >= Math.max(0, config.discordDropMinimumValue()))
+				&& (manualBingo == null || !manualBingo.acceptsDrop(authenticatedPlayerName, valuableDrop.itemName)))
+			{
+				valuableDrop = null;
+			}
 			if (valuableDrop != null)
 			{
 				scheduleAllowlistedDropFallback(valuableDrop);
 			}
 			else
 			{
-				String collectionItem = allowlistedCollectionItem(message);
+				String collectionItem = collectionItem(message);
+				if (collectionItem != null && !matchesDiscordFilter(DROP_ITEM_ALLOWLIST, collectionItem)
+					&& (manualBingo == null || !manualBingo.acceptsDrop(authenticatedPlayerName, collectionItem)))
+				{
+					collectionItem = null;
+				}
 				if (collectionItem != null)
 				{
 					scheduleAllowlistedDropFallback(new PendingAllowlistedDrop(collectionItem, 1, null));
 				}
+			}
+		}
+		else if (event.getType() == ChatMessageType.CLAN_MESSAGE)
+		{
+			BingoDrop clanDrop = ownClanDrop(message);
+			if (clanDrop != null)
+			{
+				scheduleBingoDrop(clanDrop, 3);
 			}
 		}
 		if (event.getType() == ChatMessageType.GAMEMESSAGE && PET_TRIGGER_PATTERN.matcher(message).matches())
@@ -619,46 +705,56 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void decorateAchievementMessage(Object[] objectStack, int objectStackSize)
 	{
-		if (objectStackSize < 3 || !(objectStack[2] instanceof String))
+		if (objectStack == null || objectStackSize <= 0)
 		{
 			return;
 		}
-		String message = (String) objectStack[2];
-		String plainMessage = Text.removeTags(message).replace('\u00A0', ' ').trim();
-		String lowerMessage = plainMessage.toLowerCase(java.util.Locale.ROOT);
-		if (!(lowerMessage.contains(" received a new collection log item:")
-			|| lowerMessage.contains(" has a funny feeling like")
-			|| lowerMessage.contains(" feels something weird sneaking into")))
+		for (int stackIndex = Math.min(objectStackSize, objectStack.length) - 1; stackIndex >= 0; stackIndex--)
 		{
-			return;
-		}
+			if (!(objectStack[stackIndex] instanceof String)) continue;
+			String message = (String) objectStack[stackIndex];
+			String plainMessage = Text.removeTags(message).replace('\u00A0', ' ').trim();
+			String lowerMessage = plainMessage.toLowerCase(java.util.Locale.ROOT);
+			if (!isDecoratableClanAchievement(lowerMessage)) continue;
 
-		java.util.Set<String> decoratedPlayers = new java.util.HashSet<>(mvpMembers);
-		decoratedPlayers.addAll(clanTagsByPlayer.keySet());
-		if (config.liveStatusEnabled())
-		{
-			decoratedPlayers.addAll(onlineLiveChannels.keySet());
-		}
-		for (String playerKey : decoratedPlayers)
-		{
-			if (!lowerMessage.startsWith(playerKey + " "))
+			java.util.Set<String> decoratedPlayers = new java.util.HashSet<>(mvpMembers);
+			decoratedPlayers.addAll(clanTagsByPlayer.keySet());
+			if (config.liveStatusEnabled())
 			{
-				continue;
+				decoratedPlayers.addAll(onlineLiveChannels.keySet());
 			}
-			boolean isMvp = mvpMembers.contains(playerKey);
-			boolean isLive = config.liveStatusEnabled() && onlineLiveChannels.containsKey(playerKey);
-			StringBuilder badges = new StringBuilder();
-			if (isMvp) badges.append(" <col=ffc628>MVP</col>");
-			if (isLive) badges.append(" <col=96ffaa>LIVE</col>");
-			badges.append(clanTagBadges(playerKey));
-			int insertionIndex = originalIndexAfterVisiblePrefix(message, playerKey);
-			if (badges.length() > 0 && insertionIndex >= 0)
+			for (String playerKey : decoratedPlayers)
 			{
-				objectStack[2] = message.substring(0, insertionIndex) + badges
-					+ message.substring(insertionIndex);
+				if (!lowerMessage.startsWith(playerKey + " ")) continue;
+				boolean isMvp = mvpMembers.contains(playerKey);
+				boolean isLive = config.liveStatusEnabled() && onlineLiveChannels.containsKey(playerKey);
+				StringBuilder badges = new StringBuilder();
+				if (isMvp) badges.append(" <col=ffc628>MVP</col>");
+				if (isLive) badges.append(" <col=96ffaa>LIVE</col>");
+				badges.append(clanTagBadges(playerKey));
+				int insertionIndex = originalIndexAfterVisiblePrefix(message, playerKey);
+				if (badges.length() > 0 && insertionIndex >= 0 && !message.contains(badges.toString()))
+				{
+					objectStack[stackIndex] = message.substring(0, insertionIndex) + badges
+						+ message.substring(insertionIndex);
+				}
+				return;
 			}
-			return;
 		}
+	}
+
+	static boolean isDecoratableClanAchievement(String lowerMessage)
+	{
+		if (lowerMessage == null || lowerMessage.isEmpty()) return false;
+		return lowerMessage.contains(" received a new collection log item")
+			|| lowerMessage.contains(" has received a new collection log item")
+			|| lowerMessage.contains(" has a funny feeling like")
+			|| lowerMessage.contains(" feels something weird sneaking into")
+			|| lowerMessage.contains(" received a drop:")
+			|| lowerMessage.contains(" received a valuable drop:")
+			|| lowerMessage.contains(" received special loot from a raid:")
+			|| (lowerMessage.contains(" has achieved a new ")
+				&& lowerMessage.contains(" personal best:"));
 	}
 
 	private static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
@@ -689,25 +785,286 @@ public class ClanMessagesPlugin extends Plugin
 	public void onServerNpcLoot(ServerNpcLoot event)
 	{
 		String source = Text.removeTags(event.getComposition().getName());
-		notifyDiscordDrop(source, event.getItems(), "NPC", event.getComposition().getId());
+		detectLoot(source, event.getItems(), "NPC", event.getComposition().getId(), null);
 	}
 
 	@Subscribe
 	public void onLootReceived(LootReceived event)
 	{
-		if (event.getType() != LootRecordType.NPC && event.getType() != LootRecordType.PLAYER)
+		if (event.getType() != LootRecordType.PLAYER
+			&& (event.getType() != LootRecordType.NPC || isSpecialLootNpc(event.getName())))
 		{
-			notifyDiscordDrop(event.getName(), event.getItems(), event.getType().name(), null);
+			String category = event.getType() == LootRecordType.NPC
+				&& ("Crystalline Hunllef".equals(event.getName()) || "Corrupted Hunllef".equals(event.getName()))
+				? LootRecordType.EVENT.name() : event.getType().name();
+			detectLoot(event.getName(), event.getItems(), category, null, null);
 		}
 	}
 
-	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category, Integer npcId)
+	private void detectLoot(String source, Collection<ItemStack> items, String category,
+		Integer npcId, Long singleItemValueOverride)
 	{
-		notifyDiscordDrop(source, items, category, npcId, null);
+		if (!dropParticipationEnabled()) return;
+		List<ItemStack> grouped = groupDropStacks(items);
+		if (grouped.isEmpty() || !claimDetectedDrop(grouped, null)) return;
+		captureDetectedDrop(image -> {
+			String normalizedSource = standardizedDropSource(source, category);
+			notifyDiscordDrop(normalizedSource, grouped, category, npcId, singleItemValueOverride, image);
+			notifyBingoDrops(normalizedSource, grouped, category, image);
+		});
+	}
+
+	private void rememberLootCount(String message)
+	{
+		Matcher matcher = PB_KILLCOUNT_PATTERN.matcher(message);
+		if (!matcher.find()) return;
+		try
+		{
+			lastLootCountSource = normalizeDropSource(matcher.group("boss"));
+			lastLootCount = Integer.parseInt(matcher.group("kc").replace(",", ""));
+			lastLootCountTick = client.getTickCount();
+		}
+		catch (NumberFormatException ignored)
+		{
+			lastLootCount = -1;
+		}
+	}
+
+	private String standardizedDropSource(String source, String category)
+	{
+		String normalized = standardizeKnownLootSource(normalizeDropSource(source));
+		int currentTick = client.getTickCount();
+		if ("EVENT".equals(category) && currentTick >= lastLootCountTick
+			&& currentTick - lastLootCountTick <= DROP_DEDUP_TICKS
+			&& raidSourceMatches(normalized, lastLootCountSource))
+		{
+			return lastLootCountSource;
+		}
+		return normalized;
+	}
+
+	static String standardizeKnownLootSource(String source)
+	{
+		if ("Crystalline Hunllef".equals(source)) return "The Gauntlet";
+		if ("Corrupted Hunllef".equals(source)) return "Corrupted Gauntlet";
+		return source;
+	}
+
+	static boolean raidSourceMatches(String eventSource, String announcedSource)
+	{
+		if (eventSource == null || announcedSource == null) return false;
+		String event = eventSource.toLowerCase(java.util.Locale.ROOT);
+		String announced = announcedSource.toLowerCase(java.util.Locale.ROOT);
+		return (event.equals("chambers of xeric") || event.equals("theatre of blood")
+			|| event.equals("tombs of amascut")) && announced.startsWith(event);
+	}
+
+	private static boolean isSpecialLootNpc(String name)
+	{
+		return "The Whisperer".equals(name) || "Araxxor".equals(name)
+			|| "Branda the Fire Queen".equals(name) || "Eldric the Ice King".equals(name)
+			|| "Crystalline Hunllef".equals(name) || "Corrupted Hunllef".equals(name);
+	}
+
+	private void captureDetectedDrop(java.util.function.Consumer<java.awt.Image> delivery)
+	{
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		AtomicBoolean delivered = new AtomicBoolean();
+		java.util.function.Consumer<java.awt.Image> deliverOnClient = image -> clientThread.invokeLater(() -> {
+			if (isCurrentConnectionSession(generation, account) && dropParticipationEnabled()
+				&& delivered.compareAndSet(false, true)) delivery.accept(image);
+		});
+		Runnable withoutImage = () -> {
+			deliverOnClient.accept(null);
+		};
+		try
+		{
+			drawManager.requestNextFrameListener(deliverOnClient);
+			executor.schedule(withoutImage, 2, TimeUnit.SECONDS);
+		}
+		catch (RuntimeException exception)
+		{
+			log.debug("Unable to request drop screenshot", exception);
+			withoutImage.run();
+		}
+	}
+
+	private List<ItemStack> groupDropStacks(Collection<ItemStack> items)
+	{
+		Map<Integer, Integer> quantities = new LinkedHashMap<>();
+		if (items != null)
+		{
+			for (ItemStack item : items)
+			{
+				if (item != null && item.getQuantity() > 0)
+					quantities.merge(item.getId(), item.getQuantity(), Integer::sum);
+			}
+		}
+		List<ItemStack> grouped = new ArrayList<>();
+		quantities.forEach((id, quantity) -> grouped.add(new ItemStack(id, quantity)));
+		return grouped;
+	}
+
+	private boolean claimDetectedDrop(Collection<ItemStack> items, BingoDrop fallback)
+	{
+		List<String> parts = new ArrayList<>();
+		if (fallback != null)
+		{
+			parts.add(normalizeDropFilterValue(fallback.itemName) + "x" + fallback.quantity);
+		}
+		else
+		{
+			for (ItemStack item : items)
+			{
+				String name = itemManager.getItemComposition(item.getId()).getName();
+				parts.add(normalizeDropFilterValue(name) + "x" + item.getQuantity());
+			}
+		}
+		return claimDropFingerprint(recentDetectedDrops, normalizeDropFilterValue(authenticatedPlayerName),
+			parts, fallback != null, client.getTickCount());
+	}
+
+	static boolean claimDropFingerprint(Map<String, Integer> cache, String account,
+		List<String> parts, boolean fallback, int tick)
+	{
+		if (parts.isEmpty()) return false;
+		List<String> sorted = new ArrayList<>(parts);
+		java.util.Collections.sort(sorted);
+		String key = account + "|" + String.join("|", sorted);
+		Integer previous = cache.get(key);
+		if (previous != null && tick >= previous && tick - previous <= DROP_DEDUP_TICKS) return false;
+		if (fallback)
+		{
+			Integer normalTick = cache.get(account + "|normal-item|" + sorted.get(0));
+			if (normalTick != null && tick >= normalTick && tick - normalTick <= DROP_DEDUP_TICKS) return false;
+		}
+		cache.put(key, tick);
+		if (!fallback)
+		{
+			for (String item : sorted) cache.put(account + "|normal-item|" + item, tick);
+		}
+		return true;
+	}
+
+	private static String normalizeDropSource(String source)
+	{
+		if (source == null) return "Loot";
+		String normalized = Text.removeTags(source).replace('\u00A0', ' ').replaceAll("\\s+", " ").trim();
+		return normalized.isEmpty() ? "Loot" : normalized;
+	}
+
+	private void notifyBingoDrops(String source, Collection<ItemStack> items, String category,
+		java.awt.Image screenshot)
+	{
+		if (!bingoDropParticipationEnabled() || items == null || items.isEmpty()
+			|| !validBingoSource(source)) return;
+		String account = authenticatedPlayerName;
+		for (ItemStack item : items)
+		{
+			net.runelite.api.ItemComposition composition = itemManager.getItemComposition(item.getId());
+			String itemName = composition == null ? null : composition.getName();
+			if (itemName == null || manualBingo == null || !manualBingo.acceptsDrop(account, itemName)) continue;
+			long value = (long) Math.max(0, itemManager.getItemPrice(item.getId())) * item.getQuantity();
+			sendDetectedDiscordDrop(new BingoDrop(itemName, item.getQuantity(), value, item.getId(), source, category),
+				screenshot, UUID.randomUUID().toString(), true);
+		}
+	}
+
+	private BingoDrop ownClanDrop(String message)
+	{
+		if (message == null || !dropParticipationEnabled()) return null;
+		Matcher matcher = CLAN_DROP_PATTERN.matcher(message);
+		if (!matcher.matches()) return null;
+		String authenticated = WomMembership.normalizePlayerName(authenticatedPlayerName);
+		String local = client.getLocalPlayer() == null ? ""
+			: WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+		String announced = WomMembership.normalizePlayerName(matcher.group("player"));
+		if (authenticated.isEmpty() || !authenticated.equals(local) || !authenticated.equals(announced)) return null;
+		String itemName = matcher.group("item").trim();
+		try
+		{
+			int quantity = matcher.group("quantity") == null ? 1
+				: Integer.parseInt(matcher.group("quantity").replace(",", ""));
+			Long value = matcher.group("value") == null ? null
+				: Long.parseLong(matcher.group("value").replace(",", ""));
+			boolean bingoAccepted = manualBingo != null
+				&& manualBingo.acceptsDrop(authenticatedPlayerName, itemName);
+			boolean generalAccepted = config.discordDropsEnabled()
+				&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)
+					|| (value != null && value >= Math.max(0, config.discordDropMinimumValue())));
+			boolean statsAccepted = config.statsEnabled() && value != null && value >= 1_000_000L;
+			if (!bingoAccepted && !generalAccepted && !statsAccepted) return null;
+			Integer itemId = null;
+			ItemStack resolved = resolveCollectionLogItem(itemName);
+			if (resolved != null) itemId = resolved.getId();
+			String source = "Clan Chat - " + matcher.group("kind");
+			return new BingoDrop(itemName, quantity, value, itemId, source, "CLAN_CHAT");
+		}
+		catch (NumberFormatException ignored)
+		{
+			return null;
+		}
+	}
+
+	private void scheduleBingoDrop(BingoDrop drop, int ticksRemaining)
+	{
+		clientThread.invokeLater(() -> {
+			if (ticksRemaining > 0)
+			{
+				scheduleBingoDrop(drop, ticksRemaining - 1);
+				return;
+			}
+			if (!claimDetectedDrop(java.util.Collections.emptyList(), drop)) return;
+			captureDetectedDrop(image -> {
+				if (drop.itemId != null)
+				{
+					notifyDiscordDrop(drop.source,
+						java.util.Collections.singletonList(new ItemStack(drop.itemId, drop.quantity)),
+						drop.category, null, drop.totalValue, image);
+				}
+				else if (config.discordDropsEnabled()
+					&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, drop.itemName)
+						|| (drop.totalValue != null && drop.totalValue
+							>= Math.max(0, config.discordDropMinimumValue()))))
+				{
+					sendDetectedDiscordDrop(drop, image, UUID.randomUUID().toString(), false);
+				}
+				if (drop.itemId == null) submitDetectedDropStats(drop);
+				if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, drop.itemName))
+				{
+					sendDetectedDiscordDrop(drop, image, UUID.randomUUID().toString(), true);
+				}
+			});
+		});
+	}
+
+	private boolean bingoDropParticipationEnabled()
+	{
+		if (!config.enabled() || !config.discordDropsEnabled() || isTemporaryLootWorld()
+			|| authenticatedPlayerName == null || authenticatedPlayerName.isEmpty()
+			|| client.getLocalPlayer() == null) return false;
+		return WomMembership.normalizePlayerName(authenticatedPlayerName)
+			.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName()));
+	}
+
+	private boolean dropParticipationEnabled()
+	{
+		return config.enabled() && (config.discordDropsEnabled() || config.statsEnabled())
+			&& !isTemporaryLootWorld() && authenticatedPlayerName != null
+			&& !authenticatedPlayerName.isEmpty() && client.getLocalPlayer() != null
+			&& WomMembership.normalizePlayerName(authenticatedPlayerName)
+				.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName()));
+	}
+
+	private boolean validBingoSource(String source)
+	{
+		return source != null && !source.trim().isEmpty()
+			&& !matchesDiscordFilter(DISCORD_SOURCE_DENYLIST, source);
 	}
 
 	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category,
-		Integer npcId, Long singleItemValueOverride)
+		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot)
 	{
 		if (items.isEmpty() || isTemporaryLootWorld()) return;
 		long totalValue = 0;
@@ -799,9 +1156,8 @@ public class ClanMessagesPlugin extends Plugin
 		final long dropTotalValue = notifiedValue;
 		final Double dropRarestProbability = rarestProbability;
 		final Integer dropKillCount = readDropKillCount(category, sourceName);
-		drawManager.requestNextFrameListener(image -> sendDiscordDrop(playerName, description,
-			dropThumbnailItemId, sourceName, category, npcId, dinkItems, dropTotalValue,
-			dropKillCount, dropRarestProbability, image));
+		sendDiscordDrop(playerName, description, dropThumbnailItemId, sourceName, category, npcId,
+			dinkItems, dropTotalValue, dropKillCount, dropRarestProbability, screenshot);
 	}
 
 	private long effectiveDropValue(ItemStack item, int itemCount, Long singleItemValueOverride)
@@ -835,21 +1191,31 @@ public class ClanMessagesPlugin extends Plugin
 
 	static String allowlistedCollectionItem(String message)
 	{
+		String itemName = collectionItem(message);
+		return matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName) ? itemName : null;
+	}
+
+	private static String collectionItem(String message)
+	{
 		if (message == null) return null;
 		Matcher matcher = PET_COLLECTION_PATTERN.matcher(message.replace('\u00A0', ' ').trim());
-		if (!matcher.find()) return null;
-		String itemName = matcher.group(1).trim().replaceFirst("\\.$", "");
-		return matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName) ? itemName : null;
+		return matcher.find() ? matcher.group(1).trim().replaceFirst("\\.$", "") : null;
 	}
 
 	static PendingAllowlistedDrop allowlistedValuableDrop(String message)
 	{
+		PendingAllowlistedDrop drop = parsedValuableDrop(message);
+		boolean untradeable = message != null && message.trim().toLowerCase(java.util.Locale.ROOT)
+			.startsWith("untradeable drop:");
+		return drop != null && (untradeable || matchesDiscordFilter(DROP_ITEM_ALLOWLIST, drop.itemName)) ? drop : null;
+	}
+
+	private static PendingAllowlistedDrop parsedValuableDrop(String message)
+	{
 		if (message == null) return null;
 		Matcher matcher = VALUABLE_DROP_PATTERN.matcher(message.replace('\u00A0', ' ').trim());
 		if (!matcher.find()) return null;
-		boolean untradeable = "Untradeable drop".equalsIgnoreCase(matcher.group(1));
 		String itemName = matcher.group(3).trim();
-		if (!untradeable && !matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)) return null;
 		try
 		{
 			int quantity = matcher.group(2) == null ? 1 : Integer.parseInt(matcher.group(2));
@@ -906,13 +1272,29 @@ public class ClanMessagesPlugin extends Plugin
 			ItemStack resolved = resolveCollectionLogItem(drop.itemName);
 			if (resolved == null)
 			{
-				log.debug("Unable to resolve allowlisted item: {}", drop.itemName);
+				BingoDrop fallback = new BingoDrop(drop.itemName, drop.quantity, drop.totalValue,
+					null, drop.totalValue == null ? "Collection Log" : "Valuable drop", "COLLECTION_LOG");
+				if (!claimDetectedDrop(java.util.Collections.emptyList(), fallback)) return;
+				captureDetectedDrop(image -> {
+					submitDetectedDropStats(fallback);
+					if (config.discordDropsEnabled()
+						&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, fallback.itemName)
+							|| (fallback.totalValue != null && fallback.totalValue
+								>= Math.max(0, config.discordDropMinimumValue()))))
+					{
+						sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), false);
+					}
+					if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, fallback.itemName))
+					{
+						sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), true);
+					}
+				});
 				return;
 			}
 			ItemStack item = new ItemStack(resolved.getId(), drop.quantity);
 			String source = drop.totalValue == null ? "Collection Log" : "Valuable drop";
 			log.debug("Using chat fallback for allowlisted item: {}", drop.itemName);
-			notifyDiscordDrop(source, java.util.Collections.singletonList(item),
+			detectLoot(source, java.util.Collections.singletonList(item),
 				"COLLECTION_LOG", null, drop.totalValue);
 		});
 	}
@@ -1025,6 +1407,12 @@ public class ClanMessagesPlugin extends Plugin
 		if (event.getVarbitId() == VarbitID.CA_POINTS)
 		{
 			refreshRanksAutomatically();
+		}
+		else if (event.getVarbitId() == VarbitID.TOA_SCOREBOARD_TAB
+			|| event.getVarbitId() == VarbitID.TOB_SCOREBOARD_TAB)
+		{
+			// Switching raid modes reuses the same scoreboard widgets.
+			bossStatisticsBoardScanTicks = 4;
 		}
 	}
 
@@ -2026,22 +2414,144 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void scheduleDropRetry(String payload, int attempt)
 	{
-		if (attempt >= 3) return;
 		ScheduledExecutorService currentExecutor = executor;
 		if (currentExecutor == null || currentExecutor.isShutdown()) return;
-		long delaySeconds = 1L << attempt;
-		currentExecutor.schedule(() -> submitDropPayload(payload, attempt + 1), delaySeconds, TimeUnit.SECONDS);
+		long delaySeconds = Math.min(60L, 1L << Math.min(attempt, 6));
+		currentExecutor.schedule(() -> {
+			if (config.enabled() && config.statsEnabled()) submitDropPayload(payload, Math.min(1000, attempt + 1));
+		}, delaySeconds, TimeUnit.SECONDS);
+	}
+
+	private void sendDetectedDiscordDrop(BingoDrop drop, java.awt.Image screenshot, String idempotencyKey,
+		boolean bingo)
+	{
+		String playerName = authenticatedPlayerName;
+		long totalValue = drop.totalValue == null ? 0L : Math.max(0L, drop.totalValue);
+		String valueText = drop.totalValue == null ? "valor desconhecido" : formatDropValue(totalValue);
+		Map<String, Object> embed = new LinkedHashMap<>();
+		embed.put("title", bingo ? "Bingo Drop" : "Loot Drop");
+		embed.put("description", discordWikiLink(drop.quantity + "x " + drop.itemName, drop.itemName)
+			+ " (" + valueText + ")\n" + discordWikiLink(drop.source, drop.source));
+		embed.put("color", dropEmbedColor(totalValue));
+		embed.put("author", author(playerName));
+		embed.put("timestamp", Instant.now().toString());
+		embed.put("footer", footer());
+		embed.put("fields", java.util.Collections.singletonList(
+			embedField("Total Value", discordCodeBlock(drop.totalValue == null ? "Desconhecido" : formatGp(totalValue)), true)));
+		if (drop.itemId != null && drop.itemId >= 0)
+		{
+			Map<String, Object> thumbnail = new LinkedHashMap<>();
+			thumbnail.put("url", "https://static.runelite.net/cache/item/icon/" + drop.itemId + ".png");
+			embed.put("thumbnail", thumbnail);
+		}
+
+		Map<String, Object> item = new LinkedHashMap<>();
+		if (drop.itemId != null) item.put("id", drop.itemId);
+		item.put("name", drop.itemName);
+		item.put("quantity", drop.quantity);
+		item.put("priceEach", drop.totalValue == null ? null : totalValue / Math.max(1, drop.quantity));
+		item.put("criteria", java.util.Collections.singletonList(bingo ? "BINGO_ALLOWLIST" : "ALLOWLIST"));
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("items", java.util.Collections.singletonList(item));
+		extra.put("source", drop.source);
+		extra.put("category", drop.category);
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("content", "");
+		payload.put("tts", false);
+		payload.put("embeds", java.util.Collections.singletonList(embed));
+		payload.put("type", "LOOT");
+		payload.put("playerName", playerName);
+		payload.put("idempotencyKey", idempotencyKey);
+		payload.put("accountType", String.valueOf(client.getAccountType()));
+		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
+		payload.put("world", client.getWorld());
+		payload.put("extra", extra);
+
+		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""), bingo);
+		if (requestTemplate == null || executor == null || executor.isShutdown()) return;
+		executor.execute(() -> {
+		byte[] screenshotBytes = null;
+		if (screenshot instanceof BufferedImage)
+		{
+			try
+			{
+				ByteArrayOutputStream output = new ByteArrayOutputStream();
+				if (ImageIO.write((BufferedImage) screenshot, "png", output))
+				{
+					screenshotBytes = output.toByteArray();
+					Map<String, Object> image = new LinkedHashMap<>();
+					image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
+					embed.put("image", image);
+				}
+			}
+			catch (IOException | RuntimeException exception)
+			{
+				log.debug("Unable to prepare Bingo drop screenshot; sending without it", exception);
+			}
+		}
+		MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
+			.addFormDataPart("payload_json", gson.toJson(payload));
+		if (screenshotBytes != null)
+		{
+			multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
+				RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
+		}
+		sendDiscordRequestWithRetry(requestTemplate.newBuilder().post(multipart.build()).build(), 0, bingo);
+		});
+	}
+
+	private void submitDetectedDropStats(BingoDrop drop)
+	{
+		if (!config.statsEnabled() || drop.totalValue == null || drop.totalValue < 1_000_000L) return;
+		Map<String, Object> validDrop = new LinkedHashMap<>();
+		validDrop.put("item", drop.quantity + "x " + drop.itemName);
+		validDrop.put("value", drop.totalValue);
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("eventId", UUID.randomUUID().toString());
+		payload.put("drops", java.util.Collections.singletonList(validDrop));
+		payload.put("source", normalizeDropSource(drop.source));
+		submitDropPayload(gson.toJson(payload), 0);
+	}
+
+	private void sendDiscordRequestWithRetry(Request request, int attempt, boolean bingo)
+	{
+		okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to send {} drop notification", bingo ? "Bingo" : "Discord", exception);
+				retry();
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful())
+					{
+						log.debug("{} notification relay returned {}", bingo ? "Bingo" : "Discord", response.code());
+						if (response.code() == 429 || response.code() >= 500) retry();
+					}
+				}
+			}
+
+			private void retry()
+			{
+				if (executor == null || executor.isShutdown()) return;
+				long delay = Math.min(60L, 1L << Math.min(attempt, 6));
+				executor.schedule(() -> clientThread.invokeLater(() -> {
+					if (config.discordDropsEnabled() && dropParticipationEnabled())
+						sendDiscordRequestWithRetry(request, Math.min(1000, attempt + 1), bingo);
+				}), delay, TimeUnit.SECONDS);
+			}
+		});
 	}
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
 		String category, Integer npcId, List<Map<String, Object>> items, long totalValue,
 		Integer killCount, Double rarestProbability, java.awt.Image screenshot)
 	{
-		if (screenshot == null)
-		{
-			log.debug("Discord drop notification skipped because the screenshot was unavailable");
-			return;
-		}
 		Map<String, Object> embed = new LinkedHashMap<>();
 		embed.put("title", "Loot Drop");
 		embed.put("description", limitDiscordDescription(description));
@@ -2074,6 +2584,7 @@ public class ClanMessagesPlugin extends Plugin
 		// structured fields instead of trying to recover item data from the embed.
 		payload.put("type", "LOOT");
 		payload.put("playerName", playerName);
+		payload.put("idempotencyKey", UUID.randomUUID().toString());
 		payload.put("accountType", String.valueOf(client.getAccountType()));
 		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
 		payload.put("dinkAccountHash", liveOnAccountHash(playerName));
@@ -2089,45 +2600,37 @@ public class ClanMessagesPlugin extends Plugin
 		extra.put("rarestProbability", rarestProbability);
 		extra.put("npcId", npcId);
 		payload.put("extra", extra);
-		try
+		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""));
+		if (requestTemplate == null || executor == null || executor.isShutdown()) return;
+		executor.execute(() -> {
+		byte[] screenshotBytes = null;
+		if (screenshot instanceof BufferedImage)
 		{
-			byte[] screenshotBytes = null;
-			if (screenshot != null)
+			try
 			{
-				Map<String, Object> image = new LinkedHashMap<>();
-				image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
-				embed.put("image", image);
 				ByteArrayOutputStream output = new ByteArrayOutputStream();
-				ImageIO.write((BufferedImage) screenshot, "png", output);
-				screenshotBytes = output.toByteArray();
-			}
-			// Serialize only after attachment://loot.png has been added to the
-			// embed, otherwise Discord renders the PNG as a separate attachment.
-			MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
-				.addFormDataPart("payload_json", gson.toJson(payload));
-			if (screenshotBytes != null)
-			{
-				multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
-					RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
-			}
-			Request request = discordNotificationRequest(multipart.build());
-			if (request == null)
-			{
-				return;
-			}
-			okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
-			{
-				@Override public void onFailure(okhttp3.Call call, IOException exception) { log.debug("Unable to send Discord drop notification", exception); }
-				@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+				if (ImageIO.write((BufferedImage) screenshot, "png", output))
 				{
-					try (Response ignored = response) { if (!response.isSuccessful()) log.debug("Discord notification relay returned {}", response.code()); }
+					screenshotBytes = output.toByteArray();
+					Map<String, Object> image = new LinkedHashMap<>();
+					image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
+					embed.put("image", image);
 				}
-			});
+			}
+			catch (IOException | RuntimeException exception)
+			{
+				log.debug("Unable to prepare Discord drop screenshot; sending without it", exception);
+			}
 		}
-		catch (IOException exception)
+		MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
+			.addFormDataPart("payload_json", gson.toJson(payload));
+		if (screenshotBytes != null)
 		{
-			log.debug("Unable to prepare Discord drop screenshot", exception);
+			multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
+				RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
 		}
+		sendDiscordRequestWithRetry(requestTemplate.newBuilder().post(multipart.build()).build(), 0, false);
+		});
 	}
 
 	private static Map<String, Object> embedField(String name, String value, boolean inline)
@@ -2213,6 +2716,12 @@ public class ClanMessagesPlugin extends Plugin
 	private Integer readDropKillCount(String category, String source)
 	{
 		if (source == null || source.trim().isEmpty()) return null;
+		int currentTick = client.getTickCount();
+		if (currentTick >= lastLootCountTick && currentTick - lastLootCountTick <= DROP_DEDUP_TICKS
+			&& source.equalsIgnoreCase(lastLootCountSource) && lastLootCount > 0)
+		{
+			return lastLootCount;
+		}
 		Integer chatCount = configManager.getRSProfileConfiguration("killcount", cleanBossName(source), int.class);
 		if (chatCount != null && chatCount > 0) return chatCount;
 		try
@@ -2235,10 +2744,15 @@ public class ClanMessagesPlugin extends Plugin
 	private static String cleanBossName(String source)
 	{
 		String clean = source.toLowerCase(java.util.Locale.ROOT).replace(":", "");
+		if ("the gauntlet".equals(clean) || "crystalline hunllef".equals(clean)) return "gauntlet";
+		if ("corrupted hunllef".equals(clean)) return "corrupted gauntlet";
 		if ("the leviathan".equals(clean)) return "leviathan";
 		if ("the whisperer".equals(clean)) return "whisperer";
 		if ("the hueycoatl".equals(clean)) return "hueycoatl";
 		if (clean.startsWith("barrows")) return "barrows chests";
+		if (clean.endsWith("hallowed sepulchre)")) return "hallowed sepulchre";
+		if (clean.endsWith("tempoross)")) return "tempoross";
+		if (clean.endsWith("wintertodt)")) return "wintertodt";
 		return clean;
 	}
 
@@ -2398,13 +2912,18 @@ public class ClanMessagesPlugin extends Plugin
 
 	private Request discordNotificationRequest(RequestBody body)
 	{
+		return discordNotificationRequest(body, false);
+	}
+
+	private Request discordNotificationRequest(RequestBody body, boolean bingo)
+	{
 		HttpUrl base = serverBaseUrl();
 		if (base == null || authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
 			log.debug("Discord notification skipped because the clan server is not authenticated");
 			return null;
 		}
-		HttpUrl url = base.newBuilder().addPathSegments("notifications/discord").build();
+		HttpUrl url = base.newBuilder().addPathSegments(bingo ? "notifications/bingo" : "notifications/discord").build();
 		return requestBuilder(url).post(body).build();
 	}
 
@@ -2482,8 +3001,9 @@ public class ClanMessagesPlugin extends Plugin
 			boolean backpack = pendingPetBackpack;
 			Boolean previouslyOwned = pendingPetPreviouslyOwned == null ? Boolean.TRUE : pendingPetPreviouslyOwned;
 			resetPendingPet();
-			drawManager.requestNextFrameListener(image -> sendPetNotification(playerName, petName, milestone,
-				gameMessage, duplicate, backpack, previouslyOwned, image));
+			if (config.discordDropsEnabled())
+				drawManager.requestNextFrameListener(image -> sendPetNotification(playerName, petName, milestone,
+					gameMessage, duplicate, backpack, previouslyOwned, image));
 		}
 		if (clanLiveBadgeDecorator != null)
 		{
@@ -2704,6 +3224,8 @@ public class ClanMessagesPlugin extends Plugin
 	private List<Map<String, Object>> parseOfficialBossScoreboards()
 	{
 		List<Map<String, Object>> records = new ArrayList<>();
+		records.addAll(parseToaScoreboard());
+		records.addAll(parseTobScoreboard());
 		appendOfficialScoreboard(records, InterfaceID.LeviathanScoreboard.TITLE_TEXT,
 			InterfaceID.LeviathanScoreboard.PBT, InterfaceID.LeviathanScoreboard.PBT_CONTENT);
 		appendOfficialScoreboard(records, InterfaceID.WhispererScoreboard.TITLE_TEXT,
@@ -2729,6 +3251,121 @@ public class ClanMessagesPlugin extends Plugin
 		appendOfficialScoreboard(records, InterfaceID.YamaScoreboard.TITLE_TEXT,
 			InterfaceID.YamaScoreboard.PBT, InterfaceID.YamaScoreboard.PBT_CONTENT);
 		return records;
+	}
+
+	private List<Map<String, Object>> parseToaScoreboard()
+	{
+		Widget scoreboard = client.getWidget(InterfaceID.ToaScoreboard.UNIVERSE);
+		if (!isVisibleWidget(scoreboard)) return new ArrayList<>();
+		int selectedTab = client.getVarbitValue(VarbitID.TOA_SCOREBOARD_TAB);
+		String mode = selectedTab == 0 ? "Entry Mode" : selectedTab == 2 ? "Expert Mode" : "Normal";
+		int[] personalOverallWidgets = {
+			InterfaceID.ToaScoreboard.DATA_SOLO_P_O,
+			InterfaceID.ToaScoreboard.DATA_2MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_3MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_4MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_5MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_6MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_7MAN_P_O,
+			InterfaceID.ToaScoreboard.DATA_8MAN_P_O
+		};
+		List<String> values = new ArrayList<>();
+		for (int widgetId : personalOverallWidgets)
+		{
+			Widget value = client.getWidget(widgetId);
+			values.add(isVisibleWidget(value) ? Text.removeTags(value.getText()).trim() : "");
+		}
+		return parseToaScoreboardPbs(mode, values);
+	}
+
+	private List<Map<String, Object>> parseTobScoreboard()
+	{
+		Widget scoreboard = client.getWidget(InterfaceID.TobScoreboard.UNIVERSE);
+		if (!isVisibleWidget(scoreboard)) return new ArrayList<>();
+		int selectedTab = client.getVarbitValue(VarbitID.TOB_SCOREBOARD_TAB);
+		String mode = selectedTab == 0 ? "Entry Mode" : selectedTab == 2 ? "Hard Mode" : "Normal";
+		int[] personalRoomWidgets = {
+			InterfaceID.TobScoreboard.DATA_SOLO_P_R,
+			InterfaceID.TobScoreboard.DATA_2MAN_P_R,
+			InterfaceID.TobScoreboard.DATA_3MAN_P_R,
+			InterfaceID.TobScoreboard.DATA_4MAN_P_R,
+			InterfaceID.TobScoreboard.DATA_5MAN_P_R
+		};
+		int[] personalOverallWidgets = {
+			InterfaceID.TobScoreboard.DATA_SOLO_P_O,
+			InterfaceID.TobScoreboard.DATA_2MAN_P_O,
+			InterfaceID.TobScoreboard.DATA_3MAN_P_O,
+			InterfaceID.TobScoreboard.DATA_4MAN_P_O,
+			InterfaceID.TobScoreboard.DATA_5MAN_P_O
+		};
+		List<String> roomTimes = new ArrayList<>();
+		List<String> overallTimes = new ArrayList<>();
+		for (int index = 0; index < personalRoomWidgets.length; index++)
+		{
+			roomTimes.add(visibleWidgetText(personalRoomWidgets[index]));
+			overallTimes.add(visibleWidgetText(personalOverallWidgets[index]));
+		}
+		return parseTobScoreboardPbs(mode, roomTimes, overallTimes);
+	}
+
+	private String visibleWidgetText(int widgetId)
+	{
+		Widget widget = client.getWidget(widgetId);
+		return isVisibleWidget(widget) ? Text.removeTags(widget.getText()).trim() : "";
+	}
+
+	static List<Map<String, Object>> parseToaScoreboardPbs(String mode, List<String> personalOverallTimes)
+	{
+		List<Map<String, Object>> records = new ArrayList<>();
+		if (personalOverallTimes == null) return records;
+		String recordedBoss = "Tombs of Amascut " + (mode == null ? "" : mode.trim());
+		for (int index = 0; index < Math.min(8, personalOverallTimes.size()); index++)
+		{
+			String value = personalOverallTimes.get(index) == null ? "" : personalOverallTimes.get(index).trim();
+			if (!value.matches("[0-9]+(?::[0-9]+){1,2}(?:\\.[0-9]+)?")) continue;
+			double seconds;
+			try { seconds = parsePbTime(value); }
+			catch (NumberFormatException ignored) { continue; }
+			if (seconds <= 0) continue;
+			Map<String, Object> record = pbPayload(recordedBoss, index + 1, seconds);
+			record.put("timeType", "");
+			records.add(record);
+		}
+		return records;
+	}
+
+	static List<Map<String, Object>> parseTobScoreboardPbs(String mode, List<String> personalRoomTimes,
+		List<String> personalOverallTimes)
+	{
+		List<Map<String, Object>> records = new ArrayList<>();
+		String recordedBoss = "Theatre of Blood " + (mode == null ? "" : mode.trim());
+		for (int teamIndex = 0; teamIndex < 5; teamIndex++)
+		{
+			appendTobScoreboardRecord(records, recordedBoss, teamIndex + 1, "ROOM",
+				valueAt(personalRoomTimes, teamIndex));
+			appendTobScoreboardRecord(records, recordedBoss, teamIndex + 1, "OVERALL",
+				valueAt(personalOverallTimes, teamIndex));
+		}
+		return records;
+	}
+
+	private static String valueAt(List<String> values, int index)
+	{
+		return values != null && index >= 0 && index < values.size() && values.get(index) != null
+			? values.get(index).trim() : "";
+	}
+
+	private static void appendTobScoreboardRecord(List<Map<String, Object>> records, String recordedBoss,
+		int teamSize, String timeType, String value)
+	{
+		if (!value.matches("[0-9]+(?::[0-9]+){1,2}(?:\\.[0-9]+)?")) return;
+		double seconds;
+		try { seconds = parsePbTime(value); }
+		catch (NumberFormatException ignored) { return; }
+		if (seconds <= 0) return;
+		Map<String, Object> record = pbPayload(recordedBoss, teamSize, seconds);
+		record.put("timeType", timeType);
+		records.add(record);
 	}
 
 	private void appendOfficialScoreboard(List<Map<String, Object>> records, int titleId, int labelId, int valueId)
@@ -2980,6 +3617,7 @@ public class ClanMessagesPlugin extends Plugin
 		String mode = "";
 		String normalized = boss.toLowerCase(java.util.Locale.ROOT)
 			.replace('(', ' ').replace(')', ' ').replace(':', ' ').replace('-', ' ')
+			.replace('\'', ' ').replace('’', ' ')
 			.replaceAll("\\s+", " ").trim();
 		String canonicalRaid = null;
 		if (normalized.startsWith("theatre of blood") || normalized.startsWith("theater of blood"))
@@ -3019,6 +3657,10 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				boss = "Inferno";
 			}
+			else
+			{
+				boss = canonicalActivityBoss(normalized, boss);
+			}
 		}
 		if (canonicalRaid != null) boss = canonicalRaid;
 		Map<String, Object> result = new LinkedHashMap<>();
@@ -3027,6 +3669,46 @@ public class ClanMessagesPlugin extends Plugin
 		result.put("teamSize", Math.max(0, teamSize));
 		result.put("seconds", seconds);
 		return result;
+	}
+
+	private static String canonicalActivityBoss(String normalized, String original)
+	{
+		switch (normalized)
+		{
+			case "crystalline hunllef":
+			case "gauntlet":
+			case "the gauntlet":
+				return "Gauntlet";
+			case "corrupted hunllef":
+			case "corrupted gauntlet":
+			case "the corrupted gauntlet":
+				return "Corrupted Gauntlet";
+			case "sol heredit":
+			case "colosseum":
+			case "fortis colosseum":
+				return "Fortis Colosseum";
+			case "the hueycoatl":
+			case "hueycoatl":
+				return "Hueycoatl";
+			case "the phantom muspah":
+			case "phantom muspah":
+				return "Phantom Muspah";
+			case "nightmare":
+			case "the nightmare":
+				return "The Nightmare";
+			case "phosani s nightmare":
+			case "phosani nightmare":
+			case "phosanis nightmare":
+				return "Phosani's Nightmare";
+			case "the royal titans":
+			case "royal titans":
+				return "Royal Titans";
+			case "mad angel":
+			case "the mad angel":
+				return "The Mad Angel";
+			default:
+				return original;
+		}
 	}
 
 	private static String canonicalDesertTreasureBoss(String normalized)
@@ -3090,6 +3772,8 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if (client.getGameState() != GameState.LOGGED_IN || authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty()) return;
+		fetchEventOverlay();
+		if (manualBingo != null) manualBingo.refresh();
 		if (!messageFetchInFlight.compareAndSet(false, true))
 		{
 			return;
@@ -3230,6 +3914,9 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void fetchMvpDrops()
 	{
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		ClanMessagesPanel targetPanel = panel;
 		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
 			return;
@@ -3261,10 +3948,10 @@ public class ClanMessagesPlugin extends Plugin
 					{
 						result = gson.fromJson(payload, MvpDropResponse.class);
 					}
-					if (panel != null)
+					if (targetPanel != null && targetPanel == panel && isCurrentConnectionSession(generation, account))
 					{
 						MvpDropEntry[] ranking = result == null ? null : result.ranking;
-						panel.setMvpDrops(ranking == null
+						targetPanel.setMvpDrops(ranking == null
 							? java.util.Collections.emptyList()
 							: java.util.Arrays.asList(ranking), result == null ? null : result.own);
 					}
@@ -3308,6 +3995,93 @@ public class ClanMessagesPlugin extends Plugin
 				}
 			}
 		});
+	}
+
+	private void fetchEventOverlay()
+	{
+		if (!eventOverlayFetchInFlight.compareAndSet(false, true)) return;
+		String account = authenticatedPlayerName;
+		getJson("event-overlay", new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch event overlay", exception);
+				eventOverlayFetchInFlight.set(false);
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!response.isSuccessful() || response.body() == null) return;
+					EventOverlayState state = gson.fromJson(response.body().string(), EventOverlayState.class);
+					if (panel == null || !account.equals(authenticatedPlayerName)) return;
+					if (state != null) state.synchronizedNanos = System.nanoTime();
+					eventOverlayState = state == null ? new EventOverlayState() : state;
+					if (panel != null) panel.updateEventOverlay(eventOverlayState);
+				}
+				finally
+				{
+					eventOverlayFetchInFlight.set(false);
+				}
+			}
+		});
+	}
+
+	private void saveEventOverlay(EventOverlayState state)
+	{
+		if (!isStaff || state == null) return;
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("playerName", authenticatedPlayerName);
+		payload.put("enabled", state.enabled);
+		payload.put("eventName", state.eventName);
+		payload.put("password", "");
+		payload.put("eventDate", state.eventDate);
+		payload.put("staffMessage", state.staffMessage);
+		postJson("admin/event-overlay", gson.toJson(payload), new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to save event overlay", exception);
+				if (panel != null) panel.setEventOverlayStatus("Falha ao salvar overlay");
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response)
+			{
+				try (Response ignored = response)
+				{
+					if (panel != null) panel.setEventOverlayStatus(
+						response.isSuccessful() ? "Overlay atualizado" : "Erro " + response.code());
+					if (response.isSuccessful()) fetchEventOverlay();
+				}
+			}
+		});
+	}
+
+	boolean isEventOverlayVisible()
+	{
+		return config.enabled() && config.eventOverlayEnabled() && client.getGameState() == GameState.LOGGED_IN
+			&& !authenticatedPlayerName.isEmpty();
+	}
+
+	EventOverlayState getEventOverlayState()
+	{
+		return eventOverlayState;
+	}
+
+	static final class EventOverlayState
+	{
+		boolean enabled;
+		String eventName = "";
+		String eventDate = "";
+		String staffMessage = "";
+		double serverTime;
+		transient long synchronizedNanos;
+
+		String header()
+		{
+			return eventName == null ? "" : eventName.trim();
+		}
 	}
 
 	private void publishPanelNotice(String message)
@@ -3392,6 +4166,9 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void fetchMvpEfficiency()
 	{
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		ClanMessagesPanel targetPanel = panel;
 		if (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
 		{
 			return;
@@ -3415,11 +4192,12 @@ public class ClanMessagesPlugin extends Plugin
 					com.google.gson.JsonObject payload = gson.fromJson(
 						response.body().string(), com.google.gson.JsonObject.class);
 					MvpEfficiencyResponse rankings = parseMvpEfficiencyResponse(payload);
-					if (panel != null && rankings != null)
+					if (targetPanel != null && targetPanel == panel && rankings != null
+						&& isCurrentConnectionSession(generation, account))
 					{
 						MvpEfficiencyRanking ehb = rankings.ehb;
 						MvpEfficiencyRanking ehp = rankings.ehp;
-						panel.setMvpEfficiency(
+						targetPanel.setMvpEfficiency(
 							ehb == null || ehb.ranking == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(ehb.ranking),
 							ehb == null ? null : ehb.own,
 							ehp == null || ehp.ranking == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(ehp.ranking),
@@ -4089,6 +4867,10 @@ public class ClanMessagesPlugin extends Plugin
 			pendingAllowlistedDrops.clear();
 			recentAllowlistedLootTicks.clear();
 			recentLootItemIds.clear();
+			recentDetectedDrops.clear();
+			lastLootCountSource = "";
+			lastLootCount = -1;
+			lastLootCountTick = -1000;
 			rankBankItems.clear();
 			rankBankItemIds.clear();
 			rankBankAccount = "";
@@ -4624,7 +5406,8 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 							String norm = roleName.replaceAll("[^A-Za-z0-9]", "" ).toUpperCase(java.util.Locale.ROOT);
 							java.util.Set<String> allowed = new java.util.HashSet<>();
 							allowed.add("OWNER"); allowed.add("DEPUTYOWNER"); allowed.add("MODERATOR"); allowed.add("ADMINISTRATOR");
-							if (allowed.contains(norm)) staff = true;					}
+							if (allowed.contains(norm)) staff = true;
+					}
 					isStaff = staff;
 					isDeputyOwner = isDeputyOwnerRole(roleName);
 					canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
@@ -4780,7 +5563,8 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		Request request = requestBuilder(base.newBuilder().addPathSegments(path).build())
 			.post(body)
 			.build();
-		okHttpClient.newCall(request).enqueue(callback);	}
+		okHttpClient.newCall(request).enqueue(callback);
+	}
 
 	private void getJson(String path, okhttp3.Callback callback)
 	{
@@ -4921,7 +5705,6 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 		graphics.dispose();
 		return icon;
 	}
-
 
 	private int storedInteger(String key, int fallback)
 	{
@@ -5253,7 +6036,6 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			}
 		});
 	}
-
 
 	private static final class RoleResponse
 	{

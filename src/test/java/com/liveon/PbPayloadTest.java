@@ -43,6 +43,30 @@ public class PbPayloadTest
 	}
 
 	@Test
+	public void unifiesActivityBossNamesAcrossPbSources()
+	{
+		assertRaid("Crystalline Hunllef", "Gauntlet", "");
+		assertRaid("The Gauntlet", "Gauntlet", "");
+		assertRaid("Corrupted Hunllef", "Corrupted Gauntlet", "");
+		assertRaid("The Corrupted Gauntlet", "Corrupted Gauntlet", "");
+		assertRaid("Sol Heredit", "Fortis Colosseum", "");
+		assertRaid("Colosseum", "Fortis Colosseum", "");
+		assertRaid("The Hueycoatl", "Hueycoatl", "");
+		assertRaid("The Phantom Muspah", "Phantom Muspah", "");
+		assertRaid("The Royal Titans", "Royal Titans", "");
+		assertRaid("Mad Angel", "The Mad Angel", "");
+	}
+
+	@Test
+	public void keepsNightmareEncountersSeparate()
+	{
+		assertRaid("Nightmare", "The Nightmare", "");
+		assertRaid("The Nightmare", "The Nightmare", "");
+		assertRaid("Phosani's Nightmare", "Phosani's Nightmare", "");
+		assertRaid("Phosani Nightmare", "Phosani's Nightmare", "");
+	}
+
+	@Test
 	public void readsTobHardRoomAndOverallTimesFromAdventureLog()
 	{
 		java.util.List<Map<String, Object>> records = ClanMessagesPlugin.parseAdventureLogPbs(Arrays.asList(
@@ -60,6 +84,38 @@ public class PbPayloadTest
 		assertAdventureRecord(records.get(1), "Hard Mode", 3, "OVERALL", 1339.30);
 		assertAdventureRecord(records.get(2), "Hard Mode", 4, "ROOM", 1033.20);
 		assertAdventureRecord(records.get(3), "Hard Mode", 4, "OVERALL", 1180.80);
+	}
+
+	@Test
+	public void readsOverallTimesFromSelectedToaScoreboardTab()
+	{
+		java.util.List<Map<String, Object>> records = ClanMessagesPlugin.parseToaScoreboardPbs(
+			"Expert Mode", Arrays.asList(
+				"22:44.40", "24:56.40", "27:36.00", "25:56.40",
+				"28:22.80", "-", "", "Not completed"));
+
+		assertEquals(5, records.size());
+		assertEquals("Tombs of Amascut", records.get(0).get("boss"));
+		assertEquals("Expert Mode", records.get(0).get("mode"));
+		assertEquals(1, records.get(0).get("teamSize"));
+		assertEquals(1364.4, (Double) records.get(0).get("seconds"), 0.001);
+		assertEquals(5, records.get(4).get("teamSize"));
+		assertEquals(1702.8, (Double) records.get(4).get("seconds"), 0.001);
+	}
+
+	@Test
+	public void readsRoomAndOverallTimesFromSelectedTobScoreboardTab()
+	{
+		java.util.List<Map<String, Object>> records = ClanMessagesPlugin.parseTobScoreboardPbs(
+			"Hard Mode",
+			Arrays.asList("-", "-", "20:21.60", "17:13.20", "16:48.60"),
+			Arrays.asList("-", "-", "22:19.80", "19:40.80", "18:30.60"));
+
+		assertEquals(6, records.size());
+		assertAdventureRecord(records.get(0), "Hard Mode", 3, "ROOM", 1221.60);
+		assertAdventureRecord(records.get(1), "Hard Mode", 3, "OVERALL", 1339.80);
+		assertAdventureRecord(records.get(4), "Hard Mode", 5, "ROOM", 1008.60);
+		assertAdventureRecord(records.get(5), "Hard Mode", 5, "OVERALL", 1110.60);
 	}
 
 	@Test

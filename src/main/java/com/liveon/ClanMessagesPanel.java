@@ -4,8 +4,11 @@ import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.FontFormatException;
 import java.awt.GridLayout;
 import java.awt.Rectangle;
+import java.io.IOException;
+import java.io.InputStream;
 import javax.swing.BorderFactory;
 import javax.swing.Icon;
 import javax.swing.Box;
@@ -51,7 +54,13 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JPanel navigationGrid = new JPanel(new java.awt.GridBagLayout());
 	private final JPanel mainArea = new JPanel(new BorderLayout(0, 4));
 	private final java.util.List<JButton> navigationButtons = new java.util.ArrayList<>();
-	private String selectedPage = "";
+	private final JButton staffGear = new JButton();
+	private final BingoPanel bingoTab = new BingoPanel();
+	private boolean bingoVisible;
+	private boolean authenticatedView;
+	private boolean staffView;
+	private String currentPage = "home";
+	private final JPanel clanHeader;
 	private final JPanel accessTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel chatTab = new JPanel(new BorderLayout(5, 5));
 	private final JPanel staffTab = new JPanel(new BorderLayout(5, 5));
@@ -65,7 +74,14 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JTabbedPane staffSections = new JTabbedPane();
 	private JPanel messagesStaffSection;
 	private JPanel noticesStaffSection;
+	private JPanel eventStaffSection;
+	private JPanel bingoStaffSection;
+	private JPanel mvpTagsStaffSection;
 	private JPanel livesStaffSection;
+	private final javax.swing.JCheckBox eventEnabled = new javax.swing.JCheckBox("Exibir overlay do evento");
+	private final JTextField eventName = new JTextField();
+	private final JTextField eventMessage = new JTextField();
+	private final JLabel eventStatus = new JLabel(" ");
 	private final DefaultTableModel sentMessagesModel = new DefaultTableModel(new String[]{"Staff", "Tipo", "Mensagem"}, 0)
 	{
 		@Override public boolean isCellEditable(int row, int column) { return false; }
@@ -79,7 +95,7 @@ final class ClanMessagesPanel extends PluginPanel
 	private final JLabel connectionWarningLabel = new JLabel("", SwingConstants.CENTER);
 	private int connectionWarningAttempts;
 
-	ClanMessagesPanel(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable verifyTokenAction, Runnable clearMessagesAction, Runnable refreshRanksAction, Runnable resetRanksAction, Runnable requestRankAction, Runnable refreshRankRequestsAction, java.util.function.Consumer<Integer> deleteRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> confirmRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> declineRankRequestAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, Runnable refreshLivesAction, java.util.function.BiConsumer<String, String> saveLiveChannelAction, java.util.function.Consumer<LiveChannel> deleteLiveChannelAction, Runnable refreshMvpMembersAction, java.util.function.Consumer<String> saveMvpMemberAction, java.util.function.Consumer<MvpMember> deleteMvpMemberAction, Runnable refreshClanTagsAction, java.util.function.BiConsumer<String, String> createClanTagAction, java.util.function.BiConsumer<ClanTag, String> addClanTagMemberAction, java.util.function.Consumer<ClanTag> deleteClanTagAction, java.util.function.BiConsumer<ClanTag, ClanTagMember> removeClanTagMemberAction, Runnable refreshPbCategoriesAction, java.util.function.Consumer<PbCategory> selectPbCategoryAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction, net.runelite.client.util.AsyncBufferedImage mvpDropIcon)
+	ClanMessagesPanel(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable verifyTokenAction, Runnable clearMessagesAction, Runnable refreshRanksAction, Runnable resetRanksAction, Runnable requestRankAction, Runnable refreshRankRequestsAction, java.util.function.Consumer<Integer> deleteRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> confirmRankRequestAction, java.util.function.Consumer<RankRequestsPanel.RankRequest> declineRankRequestAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, java.util.function.Consumer<ClanMessagesPlugin.EventOverlayState> saveEventOverlayAction, Runnable refreshLivesAction, java.util.function.BiConsumer<String, String> saveLiveChannelAction, java.util.function.Consumer<LiveChannel> deleteLiveChannelAction, Runnable refreshMvpMembersAction, java.util.function.Consumer<String> saveMvpMemberAction, java.util.function.Consumer<MvpMember> deleteMvpMemberAction, Runnable refreshClanTagsAction, java.util.function.BiConsumer<String, String> createClanTagAction, java.util.function.BiConsumer<ClanTag, String> addClanTagMemberAction, java.util.function.Consumer<ClanTag> deleteClanTagAction, java.util.function.BiConsumer<ClanTag, ClanTagMember> removeClanTagMemberAction, Runnable refreshPbCategoriesAction, java.util.function.Consumer<PbCategory> selectPbCategoryAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction, net.runelite.client.util.AsyncBufferedImage mvpDropIcon)
 	{
 		super(false);
 		mvpTab = new MvpPanel(mvpDropIcon);
@@ -96,11 +112,83 @@ final class ClanMessagesPanel extends PluginPanel
 		pbTab = new PbPanel(refreshPbCategoriesAction, selectPbCategoryAction);
 		createStaffTab(publishBroadcastAction, publishClanAction, clearMessagesAction, refreshSentMessagesAction,
 			deleteSentMessageAction, resendSentMessageAction, togglePinnedMessageAction,
-			publishPanelNoticeAction, removePanelNoticeAction, initialStaffAccessKey, saveStaffAccessKeyAction);
+			publishPanelNoticeAction, removePanelNoticeAction, saveEventOverlayAction,
+			initialStaffAccessKey, saveStaffAccessKeyAction);
+		clanHeader = createClanHeader();
+		clanHeader.setVisible(false);
+		add(clanHeader, BorderLayout.NORTH);
 		setAuthenticated(false, false);
 		add(mainArea, BorderLayout.CENTER);
 		add(createLinksFooter(), BorderLayout.SOUTH);
 		setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH, 650));
+	}
+
+	private JPanel createClanHeader()
+	{
+		Font brandFont = loadBrandFont();
+		JPanel header = new JPanel(new BorderLayout(4, 0));
+		header.setBackground(new java.awt.Color(20, 22, 19));
+		header.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 0, 2, 0, new java.awt.Color(166, 226, 46)),
+			BorderFactory.createEmptyBorder(3, 2, 3, 2)));
+		JLabel logo = new JLabel(loadIcon("/live-on-logo.png", 52));
+		logo.setToolTipText("Live On Clan");
+		header.add(logo, BorderLayout.WEST);
+		JPanel brand = new JPanel(new java.awt.GridBagLayout());
+		brand.setOpaque(false);
+		JPanel lettering = new JPanel(new BorderLayout(0, 1));
+		lettering.setOpaque(false);
+		JPanel title = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.CENTER, 0, 0));
+		title.setOpaque(false);
+		JLabel liveTitle = new JLabel("LIVE ");
+		liveTitle.setFont(brandFont.deriveFont(21f));
+		liveTitle.setForeground(new java.awt.Color(242, 242, 239));
+		JLabel onTitle = new JLabel("ON");
+		onTitle.setFont(brandFont.deriveFont(21f));
+		onTitle.setForeground(new java.awt.Color(166, 226, 46));
+		title.add(liveTitle);
+		title.add(onTitle);
+		JLabel subtitle = new JLabel("CLAN", SwingConstants.CENTER);
+		subtitle.setFont(brandFont.deriveFont(12f));
+		subtitle.setIcon(createBrazilFlag());
+		subtitle.setHorizontalTextPosition(SwingConstants.LEFT);
+		subtitle.setIconTextGap(5);
+		subtitle.setToolTipText("Live On Clan · Brasil");
+		subtitle.setForeground(new java.awt.Color(235, 235, 230));
+		lettering.add(title, BorderLayout.NORTH);
+		lettering.add(subtitle, BorderLayout.CENTER);
+		brand.add(lettering);
+		header.add(brand, BorderLayout.CENTER);
+		staffGear.setIcon(loadIcon("/staff-icon.png", 22));
+		staffGear.setName("staff");
+		staffGear.setToolTipText("Abrir painel da staff");
+		staffGear.getAccessibleContext().setAccessibleName("Staff");
+		staffGear.setPreferredSize(new Dimension(25, 28));
+		staffGear.setFocusPainted(false);
+		staffGear.setContentAreaFilled(true);
+		staffGear.setOpaque(true);
+		staffGear.setRolloverEnabled(true);
+		staffGear.getModel().addChangeListener(event -> styleStaffGear("staff".equals(currentPage)));
+		styleStaffGear(false);
+		staffGear.addActionListener(event -> { if (staffGear.isVisible()) selectPage("staff"); });
+		JPanel staffGearHolder = new JPanel(new BorderLayout());
+		staffGearHolder.setOpaque(false);
+		staffGearHolder.add(staffGear, BorderLayout.NORTH);
+		header.add(staffGearHolder, BorderLayout.EAST);
+		return header;
+	}
+
+	private static Font loadBrandFont()
+	{
+		try (InputStream stream = ClanMessagesPanel.class.getResourceAsStream("/RussoOne-Regular.ttf"))
+		{
+			if (stream != null) return Font.createFont(Font.TRUETYPE_FONT, stream);
+		}
+		catch (FontFormatException | IOException ignored)
+		{
+			// Keep the header usable if the bundled font cannot be loaded.
+		}
+		return new Font(Font.SANS_SERIF, Font.BOLD, 12);
 	}
 
 	private JPanel createLinksFooter()
@@ -118,7 +206,7 @@ final class ClanMessagesPanel extends PluginPanel
 		discord.addActionListener(event -> LinkBrowser.browse("https://www.discord.gg/liveon"));
 
 		JButton wom = new JButton("WOM");
-		wom.setIcon(loadIcon("/links/wom.png", 16));
+		wom.setIcon(loadIconPreservingAspect("/links/wom.png", 16));
 		wom.setToolTipText("Abrir grupo no Wise Old Man");
 		wom.setMargin(new java.awt.Insets(3, 6, 3, 6));
 		wom.addActionListener(event -> LinkBrowser.browse("https://wiseoldman.net/groups/1945"));
@@ -143,15 +231,63 @@ final class ClanMessagesPanel extends PluginPanel
 		return new ImageIcon(scaled);
 	}
 
+	private ImageIcon loadIconPreservingAspect(String resource, int size)
+	{
+		java.awt.image.BufferedImage image = ImageUtil.loadImageResource(getClass(), resource);
+		if (image == null)
+		{
+			return null;
+		}
+		double scale = Math.min((double) size / image.getWidth(), (double) size / image.getHeight());
+		int width = Math.max(1, (int) Math.round(image.getWidth() * scale));
+		int height = Math.max(1, (int) Math.round(image.getHeight() * scale));
+		return new ImageIcon(image.getScaledInstance(width, height, java.awt.Image.SCALE_SMOOTH));
+	}
+
+	private static ImageIcon createBrazilFlag()
+	{
+		// Vector geometry from the flag supplied by the clan:
+		// https://discord.com/assets/def3269342128c31.svg
+		java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(44, 44, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+		java.awt.Graphics2D g = image.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+		g.scale(44.0 / 36, 44.0 / 36);
+		g.setColor(new java.awt.Color(0x009B3A));
+		g.fill(new java.awt.geom.RoundRectangle2D.Double(0, 5, 36, 26, 8, 8));
+		java.awt.geom.Path2D diamond = new java.awt.geom.Path2D.Double();
+		diamond.moveTo(32.728, 18); diamond.lineTo(18, 29.124);
+		diamond.lineTo(3.272, 18); diamond.lineTo(18, 6.875); diamond.closePath();
+		g.setColor(new java.awt.Color(0xFEDF01)); g.fill(diamond);
+		g.setColor(new java.awt.Color(0x002776));
+		g.fill(new java.awt.geom.Ellipse2D.Double(11.518, 11.466, 12.916, 12.916));
+		java.awt.geom.Path2D band = new java.awt.geom.Path2D.Double();
+		band.moveTo(12.277, 14.887);
+		band.curveTo(11.945, 15.508, 11.719, 16.190, 11.605, 16.910);
+		band.curveTo(15.600, 16.620, 21.022, 18.801, 23.349, 21.505);
+		band.curveTo(23.751, 20.901, 24.049, 20.225, 24.232, 19.501);
+		band.curveTo(21.360, 16.693, 16.315, 14.871, 12.277, 14.887);
+		band.closePath(); g.setColor(new java.awt.Color(0xCBE9D4)); g.fill(band);
+		int[][] stars = {{12, 18, 0x88C9F9}, {13, 20, 0x88C9F9}, {15, 18, 0x55ACEE},
+			{17, 19, 0x55ACEE}, {21, 21, 0x55ACEE}, {18, 22, 0x55ACEE}, {21, 15, 0x55ACEE}, {19, 20, 0x3B88C3}};
+		for (int[] star : stars) {
+			g.setColor(new java.awt.Color(star[2]));
+			g.fill(new java.awt.geom.Rectangle2D.Double(star[0], star[1] + 0.233, 1, 1));
+		}
+		g.dispose();
+		return new ImageIcon(image.getScaledInstance(22, 22, java.awt.Image.SCALE_SMOOTH));
+	}
+
 	private ImageIcon createUiIcon(String type)
 	{
 		java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
 		java.awt.Graphics2D graphics = image.createGraphics();
 		graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
 		graphics.setColor("live".equals(type) ? new java.awt.Color(50, 210, 90)
-			: ("home".equals(type) || "crown".equals(type) || "trophy".equals(type) || "star".equals(type) || "ranks".equals(type) || "key".equals(type) || "tag".equals(type))
-				? new java.awt.Color(225, 170, 45) : new java.awt.Color(210, 210, 210));
+			: ("home".equals(type) || "crown".equals(type) || "trophy".equals(type) || "bingo".equals(type) || "star".equals(type) || "ranks".equals(type) || "key".equals(type) || "tag".equals(type))
+				? new java.awt.Color(166, 226, 46) : new java.awt.Color(210, 210, 210));
 		graphics.setStroke(new java.awt.BasicStroke(1.7f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
+
+
 		if ("refresh".equals(type))
 		{
 			graphics.drawArc(2, 2, 11, 11, 35, 285);
@@ -192,6 +328,17 @@ final class ClanMessagesPanel extends PluginPanel
 			graphics.drawArc(9, 3, 6, 6, -100, 200);
 			graphics.drawLine(8, 9, 8, 13);
 			graphics.drawLine(5, 14, 11, 14);
+		}
+		else if ("bingo".equals(type))
+		{
+			for (int row = 0; row < 3; row++)
+			{
+				for (int column = 0; column < 3; column++)
+				{
+					if (row == 1 && column == 1) graphics.fillOval(6, 6, 4, 4);
+					else graphics.drawOval(2 + column * 5, 2 + row * 5, 2, 2);
+				}
+			}
 		}
 		else if ("crown".equals(type))
 		{
@@ -245,9 +392,10 @@ final class ClanMessagesPanel extends PluginPanel
 	private void addNavigationButton(String title, String iconType, JPanel component, String pageKey, String tooltip)
 	{
 		component.setMinimumSize(new Dimension(0, 0));
-		if (component instanceof MvpPanel || component == staffTab)
+		if (component instanceof MvpPanel || component instanceof PbPanel
+			|| component == staffTab || component == bingoTab)
 		{
-			// MVP sections already own their scrolling. Wrapping them in another
+			// These sections already own their scrolling. Wrapping them in another
 			// scroll pane makes the inner pane consume wheel events without moving.
 			mainCards.add(component, pageKey);
 		}
@@ -302,52 +450,37 @@ final class ClanMessagesPanel extends PluginPanel
 
 	private void selectPage(String pageKey)
 	{
-		selectedPage = pageKey;
+		currentPage = pageKey;
 		mainCardsLayout.show(mainCards, pageKey);
 		for (JButton button : navigationButtons)
 		{
 			boolean selected = pageKey.equals(button.getName());
-			button.setForeground(selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(210, 210, 210));
+			button.setForeground(selected ? new java.awt.Color(166, 226, 46) : new java.awt.Color(210, 210, 210));
 			button.setBackground(selected ? new java.awt.Color(50, 50, 50) : new java.awt.Color(35, 35, 35));
+			if (button == staffGear)
+			{
+				styleStaffGear(selected);
+				continue;
+			}
 			button.setBorder(BorderFactory.createCompoundBorder(
 				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 1, 0,
-					selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(55, 55, 55)),
+					selected ? new java.awt.Color(166, 226, 46) : new java.awt.Color(55, 55, 55)),
 				BorderFactory.createEmptyBorder(3, 3, selected ? 2 : 3, 3)));
 		}
 	}
 
-	private static void updateNavigationStyle(JTabbedPane tabbedPane)
+	private void styleStaffGear(boolean selected)
 	{
-		for (int index = 0; index < tabbedPane.getTabCount(); index++)
-		{
-			java.awt.Component component = tabbedPane.getTabComponentAt(index);
-			if (!(component instanceof javax.swing.AbstractButton)) continue;
-			javax.swing.AbstractButton label = (javax.swing.AbstractButton) component;
-			boolean selected = index == tabbedPane.getSelectedIndex();
-			label.setForeground(selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(210, 210, 210));
-			label.setBorder(BorderFactory.createCompoundBorder(
-				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 0, 0, new java.awt.Color(255, 152, 0)),
-				BorderFactory.createEmptyBorder(5, 3, selected ? 3 : 5, 3)));
-		}
-	}
-
-	private void configureSectionTabs(JTabbedPane sections, String[] titles, String[] iconTypes)
-	{
-		sections.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
-		for (int index = 0; index < sections.getTabCount(); index++)
-		{
-			JButton label = new JButton(titles[index], createUiIcon(iconTypes[index]));
-			label.setIconTextGap(3);
-			label.setContentAreaFilled(false);
-			label.setFocusPainted(false);
-			label.setMargin(new java.awt.Insets(0, 0, 0, 0));
-			label.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
-			final int tabIndex = index;
-			label.addActionListener(event -> sections.setSelectedIndex(tabIndex));
-			sections.setTabComponentAt(index, label);
-		}
-		sections.addChangeListener(event -> updateNavigationStyle(sections));
-		updateNavigationStyle(sections);
+		boolean pressed = staffGear.getModel().isPressed();
+		boolean highlighted = selected || pressed || staffGear.getModel().isRollover();
+		staffGear.setBackground(pressed
+			? new java.awt.Color(56, 76, 35)
+			: highlighted ? new java.awt.Color(42, 48, 36) : new java.awt.Color(28, 28, 28));
+		staffGear.setBorder(highlighted
+			? BorderFactory.createCompoundBorder(
+				BorderFactory.createLineBorder(new java.awt.Color(166, 226, 46)),
+				BorderFactory.createEmptyBorder(2, 2, 2, 2))
+			: BorderFactory.createEmptyBorder(3, 3, 3, 3));
 	}
 
 	private static void updateStaffTabStyle(JTabbedPane sections)
@@ -358,10 +491,10 @@ final class ClanMessagesPanel extends PluginPanel
 			if (!(component instanceof JButton)) continue;
 			JButton button = (JButton) component;
 			boolean selected = index == sections.getSelectedIndex();
-			button.setBackground(selected ? new java.awt.Color(71, 52, 20) : new java.awt.Color(35, 33, 30));
+			button.setBackground(selected ? new java.awt.Color(43, 58, 29) : new java.awt.Color(35, 33, 30));
 			button.setBorder(BorderFactory.createCompoundBorder(
 				BorderFactory.createMatteBorder(0, 0, selected ? 2 : 1, 0,
-					selected ? new java.awt.Color(255, 152, 0) : new java.awt.Color(60, 57, 52)),
+					selected ? new java.awt.Color(166, 226, 46) : new java.awt.Color(52, 62, 45)),
 				BorderFactory.createEmptyBorder(3, 8, selected ? 2 : 3, 8)));
 		}
 	}
@@ -483,7 +616,7 @@ final class ClanMessagesPanel extends PluginPanel
 		chatTab.add(status, BorderLayout.SOUTH);
 	}
 
-	private void createStaffTab(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable clearMessagesAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction)
+	private void createStaffTab(Runnable publishBroadcastAction, Runnable publishClanAction, Runnable clearMessagesAction, Runnable refreshSentMessagesAction, java.util.function.Consumer<StaffSentMessage> deleteSentMessageAction, java.util.function.Consumer<StaffSentMessage> resendSentMessageAction, java.util.function.Consumer<StaffSentMessage> togglePinnedMessageAction, java.util.function.Consumer<String> publishPanelNoticeAction, Runnable removePanelNoticeAction, java.util.function.Consumer<ClanMessagesPlugin.EventOverlayState> saveEventOverlayAction, String initialStaffAccessKey, java.util.function.Consumer<String> saveStaffAccessKeyAction)
 	{
 		staffTab.setBackground(new java.awt.Color(28, 26, 23));
 		staffTab.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(122, 82, 24)));
@@ -589,6 +722,9 @@ final class ClanMessagesPanel extends PluginPanel
 		messagesStaffSection.add(history);
 		messagesStaffSection.add(Box.createVerticalGlue());
 		noticesStaffSection = createNoticesManagement(publishPanelNoticeAction, removePanelNoticeAction);
+		eventStaffSection = createEventManagement(saveEventOverlayAction);
+		bingoStaffSection = createBingoManagement();
+		mvpTagsStaffSection = createMvpTagsManagement();
 		livesStaffSection = liveOnTab.managementPanel();
 		staffSections.setTabLayoutPolicy(JTabbedPane.WRAP_TAB_LAYOUT);
 		staffSections.setBackground(new java.awt.Color(28, 26, 23));
@@ -690,6 +826,116 @@ final class ClanMessagesPanel extends PluginPanel
 		return panel;
 	}
 
+	private JPanel createEventManagement(
+		java.util.function.Consumer<ClanMessagesPlugin.EventOverlayState> saveEventOverlayAction)
+	{
+		JPanel panel = new JPanel();
+		panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+		panel.setBorder(BorderFactory.createEmptyBorder(8, 6, 8, 6));
+		JLabel title = new JLabel("OVERLAY DO EVENTO");
+		title.setForeground(new java.awt.Color(166, 226, 46));
+		title.setAlignmentX(Component.LEFT_ALIGNMENT);
+		panel.add(title);
+		panel.add(Box.createVerticalStrut(5));
+		eventEnabled.setAlignmentX(Component.LEFT_ALIGNMENT);
+		panel.add(eventEnabled);
+		addEventField(panel, "Campo 1", eventName, "Texto da primeira linha");
+		panel.add(new JLabel("Relógio automático · Brasília"));
+		addEventField(panel, "Campo 2", eventMessage, "Texto da segunda linha");
+		JButton save = new JButton("Salvar overlay");
+		save.setBackground(new java.awt.Color(190, 104, 0));
+		save.setForeground(java.awt.Color.WHITE);
+		save.setAlignmentX(Component.LEFT_ALIGNMENT);
+		save.addActionListener(event ->
+		{
+			ClanMessagesPlugin.EventOverlayState state = new ClanMessagesPlugin.EventOverlayState();
+			state.enabled = eventEnabled.isSelected();
+			state.eventName = eventName.getText().trim();
+			state.staffMessage = eventMessage.getText().trim();
+			eventStatus.setText("Salvando...");
+			saveEventOverlayAction.accept(state);
+		});
+		panel.add(Box.createVerticalStrut(8));
+		panel.add(save);
+		eventStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+		panel.add(eventStatus);
+		panel.add(Box.createVerticalGlue());
+		return panel;
+	}
+
+	private JPanel createBingoManagement()
+	{
+		JPanel bingoManagement = bingoTab.administration();
+		JPanel overlayFooter = new JPanel();
+		overlayFooter.setLayout(new BoxLayout(overlayFooter, BoxLayout.Y_AXIS));
+		JButton overlayToggle = new JButton("▸ Overlay do bingo");
+		overlayToggle.setHorizontalAlignment(SwingConstants.LEFT);
+		overlayToggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+		overlayToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+		eventStaffSection.setAlignmentX(Component.LEFT_ALIGNMENT);
+		eventStaffSection.setMaximumSize(new Dimension(Integer.MAX_VALUE, 205));
+		eventStaffSection.setVisible(false);
+		overlayToggle.addActionListener(event ->
+		{
+			boolean expanded = !eventStaffSection.isVisible();
+			eventStaffSection.setVisible(expanded);
+			overlayToggle.setText(expanded ? "▾ Overlay do bingo" : "▸ Overlay do bingo");
+			overlayFooter.revalidate();
+			overlayFooter.repaint();
+		});
+		overlayFooter.add(eventStaffSection);
+		overlayFooter.add(overlayToggle);
+		JPanel combined = new JPanel(new BorderLayout());
+		combined.add(bingoManagement, BorderLayout.CENTER);
+		combined.add(overlayFooter, BorderLayout.SOUTH);
+		return combined;
+	}
+
+	private JPanel createMvpTagsManagement()
+	{
+		JPanel mvpBody = new JPanel(new BorderLayout(0, 4));
+		JLabel fixedMvp = new JLabel("MVP · etiqueta fixa");
+		fixedMvp.setToolTipText("A etiqueta MVP faz parte do ranking e não pode ser excluída");
+		mvpBody.add(fixedMvp, BorderLayout.NORTH);
+		mvpBody.add(mvpManagementTab, BorderLayout.CENTER);
+		mvpBody.setPreferredSize(new Dimension(190, 300));
+		mvpBody.setMaximumSize(new Dimension(Integer.MAX_VALUE, 300));
+		mvpBody.setVisible(false);
+
+		JButton mvpToggle = new JButton("▸ MVP");
+		mvpToggle.setHorizontalAlignment(SwingConstants.LEFT);
+		mvpToggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+		mvpToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+		JPanel mvpFooter = new JPanel();
+		mvpFooter.setLayout(new BoxLayout(mvpFooter, BoxLayout.Y_AXIS));
+		mvpToggle.addActionListener(event ->
+		{
+			boolean expanded = !mvpBody.isVisible();
+			mvpBody.setVisible(expanded);
+			mvpToggle.setText(expanded ? "▾ MVP" : "▸ MVP");
+			mvpFooter.revalidate();
+			mvpFooter.repaint();
+		});
+		mvpFooter.add(mvpBody);
+		mvpFooter.add(mvpToggle);
+
+		JPanel combined = new JPanel(new BorderLayout());
+		combined.add(clanTagsTab, BorderLayout.CENTER);
+		combined.add(mvpFooter, BorderLayout.SOUTH);
+		return combined;
+	}
+
+	private static void addEventField(JPanel panel, String label, JTextField field, String tooltip)
+	{
+		JLabel title = new JLabel(label);
+		title.setAlignmentX(Component.LEFT_ALIGNMENT);
+		field.setToolTipText(tooltip);
+		field.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		field.setAlignmentX(Component.LEFT_ALIGNMENT);
+		panel.add(Box.createVerticalStrut(5));
+		panel.add(title);
+		panel.add(field);
+	}
 
 	private void addStaffSection(String title, java.awt.Component component, String tooltip, String iconType)
 	{
@@ -713,6 +959,7 @@ final class ClanMessagesPanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
+			bingoTab.refreshPermissions();
 			rebuildStaffSections(deputyOwner);
 			staffTab.revalidate();
 			staffTab.repaint();
@@ -726,10 +973,10 @@ final class ClanMessagesPanel extends PluginPanel
 		addStaffSection("Ranks", rankRequestsTab, "Solicitações de rank", "requests");
 		addStaffSection("Broadcast", messagesStaffSection, "Enviar broadcasts e mensagens", "message");
 		addStaffSection("Lives", livesStaffSection, "Gerenciar canais da Twitch", "live");
+		addStaffSection("Bingo", bingoStaffSection, "Bingo e overlay do evento", "bingo");
 		if (deputyOwner)
 		{
-			addStaffSection("MVP", mvpManagementTab, "Gerenciar membros MVP", "trophy");
-			addStaffSection("Tags", clanTagsTab, "Gerenciar etiquetas do clã", "tag");
+			addStaffSection("Etiquetas", mvpTagsStaffSection, "Gerenciar MVP e etiquetas do clã", "tag");
 		}
 		addStaffSection("Aviso painel", noticesStaffSection, "Gerenciar aviso fixo do Painel", "pin");
 		int selectedIndex = selected == null ? -1 : staffSections.indexOfComponent(selected);
@@ -747,11 +994,29 @@ final class ClanMessagesPanel extends PluginPanel
 		action.accept(currentSentMessages.get(selectedRow));
 	}
 
+	BingoPanel bingo() { return bingoTab; }
+
+	void updateBingo(com.google.gson.JsonObject board)
+	{
+		SwingUtilities.invokeLater(() -> {
+			if (!authenticatedView) return;
+			bingoTab.update(board);
+			boolean visible = board.get("visible").getAsBoolean();
+			if (visible != bingoVisible) { bingoVisible = visible; setAuthenticated(authenticatedView, staffView); }
+		});
+	}
+
 	void setAuthenticated(boolean authenticated, boolean staff)
 	{
 		SwingUtilities.invokeLater(() ->
 		{
+			authenticatedView = authenticated; staffView = staff;
+			if (!authenticated) bingoVisible = false;
 			mvpTab.setStaff(authenticated && staff);
+			staffGear.setVisible(authenticated && staff);
+			clanHeader.setVisible(authenticated);
+			revalidate();
+			repaint();
 			publishNotice.setEnabled(authenticated && staff);
 			removeNotice.setEnabled(authenticated && staff);
 			mainArea.removeAll();
@@ -771,13 +1036,17 @@ final class ClanMessagesPanel extends PluginPanel
 			addNavigationButton("Ranks", "star", ranksTab, "ranks", "Solicitação de ranks");
 			addNavigationButton("MVPs", "crown", mvpTab, "mvp", "Rankings MVP");
 			addNavigationButton("PBs", "trophy", pbTab, "pbs", "Recordes pessoais do clã");
+			if (bingoVisible || staff) addNavigationButton("Bingo", "bingo", bingoTab, "bingo", "Progresso e itens que faltam");
 			if (staff)
 			{
-				addNavigationButton("Staff", "key", staffTab, "staff", "Abrir painel da staff");
+				mainCards.add(staffTab, "staff");
+				navigationButtons.add(staffGear);
 			}
 			mainArea.add(navigationGrid, BorderLayout.NORTH);
 			mainArea.add(mainCards, BorderLayout.CENTER);
-			selectPage("home");
+			String destination = currentPage;
+			if (("bingo".equals(destination) && !bingoVisible && !staff) || ("staff".equals(destination) && !staff)) destination = "home";
+			selectPage(destination);
 			mainArea.revalidate();
 			mainArea.repaint();
 		});
@@ -1010,6 +1279,21 @@ final class ClanMessagesPanel extends PluginPanel
 	void setPanelNoticeStatus(String text)
 	{
 		SwingUtilities.invokeLater(() -> noticeStatus.setText(text));
+	}
+	void updateEventOverlay(ClanMessagesPlugin.EventOverlayState state)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (eventName.hasFocus() || eventMessage.hasFocus()) return;
+			eventEnabled.setSelected(state != null && state.enabled);
+			eventName.setText(state == null || state.eventName == null ? "" : state.eventName);
+			eventMessage.setText(state == null || state.staffMessage == null ? "" : state.staffMessage);
+			eventStatus.setText(state != null && state.enabled ? "Overlay ativo" : "Overlay desativado");
+		});
+	}
+	void setEventOverlayStatus(String text)
+	{
+		SwingUtilities.invokeLater(() -> eventStatus.setText(text));
 	}
 	void updateOnlineLives(java.util.List<LiveChannel> channels) { liveOnTab.updateOnline(channels); }
 	void updateRecentActivities(java.util.List<RecentActivity> activities) { liveOnTab.updateRecent(activities); }
