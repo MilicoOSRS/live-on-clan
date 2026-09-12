@@ -6,6 +6,7 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.util.Arrays;
 import java.util.List;
@@ -17,8 +18,6 @@ import javax.swing.JButton;
 import javax.swing.Icon;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
-import javax.swing.JScrollPane;
-import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 
@@ -31,6 +30,10 @@ final class RanksPanel extends JPanel
 	private static final int NEXT_REQUIREMENT_TEXT_WIDTH = 148;
 	private static final int REQUIREMENT_NOTICE_TEXT_WIDTH = 174;
 	private static final int REQUIREMENT_NOTICE_WIDTH = PANEL_WIDTH - 30;
+	private static final Font COMPACT_DETAIL_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 11);
+	private static final Font COMPACT_DETAIL_TITLE_FONT = COMPACT_DETAIL_FONT.deriveFont(Font.BOLD);
+	private static final Font RANK_NAME_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 12);
+	private static final int RANK_ICON_SIZE = 13;
 	private static final Color ORANGE = new Color(190, 104, 0);
 	private static final String REQUEST_PENDING_TEXT = "Aguardando aprovação";
 	private static final String REQUEST_PENDING_STATUS = "Solicitação enviada para a staff.";
@@ -56,6 +59,7 @@ final class RanksPanel extends JPanel
 	private final JLabel helper = new JLabel(wrapped("Equipe os itens exigidos e abra os menus necessários antes de verificar.", BODY_TEXT_WIDTH));
 	private final JPanel detected = new JPanel();
 	private final JPanel requirementsCard = new JPanel(new BorderLayout());
+	private final JPanel header = new JPanel();
 	private final JLabel status = new JLabel(" ", SwingConstants.CENTER);
 	private final JButton verify;
 	private final JButton requestRank;
@@ -66,15 +70,22 @@ final class RanksPanel extends JPanel
 	RanksPanel(Runnable refreshAction, Runnable resetAction, Runnable requestRankAction)
 	{
 		setLayout(new BorderLayout(5, 5));
-		setPreferredSize(new Dimension(PANEL_WIDTH, 650));
 		setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
 		verify = new JButton("Verificar");
 		verify.setToolTipText("Atualizar itens, pontos e requisitos do rank");
 		verify.setBackground(ORANGE);
 		verify.setForeground(Color.WHITE);
 		verify.addActionListener(event -> refreshAction.run());
+		requestRank = new JButton("Solicitar novo rank");
+		requestRank.setBackground(ORANGE);
+		requestRank.setForeground(Color.WHITE);
+		requestRank.setEnabled(false);
+		requestRank.setVisible(false);
+		requestRank.setAlignmentX(Component.LEFT_ALIGNMENT);
+		requestRank.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		requestRank.addActionListener(event -> requestRankAction.run());
 
-		playerName.setFont(playerName.getFont().deriveFont(Font.BOLD, 14f));
+		playerName.setFont(playerName.getFont().deriveFont(Font.BOLD, 15f));
 		actualRank.setForeground(new Color(170, 170, 170));
 		JPanel identityText = new JPanel(new GridLayout(0, 1, 1, 1));
 		identityText.setOpaque(false);
@@ -86,7 +97,7 @@ final class RanksPanel extends JPanel
 		identity.add(identityText, BorderLayout.CENTER);
 
 		availableTitle.setFont(availableTitle.getFont().deriveFont(Font.BOLD));
-		availableRank.setFont(availableRank.getFont().deriveFont(Font.BOLD, 14f));
+		availableRank.setFont(RANK_NAME_FONT);
 		JPanel availableHeader = new JPanel(new BorderLayout());
 		availableHeader.setBorder(BorderFactory.createEmptyBorder(3, 6, 3, 6));
 		availableHeader.add(availableTitle, BorderLayout.CENTER);
@@ -98,7 +109,6 @@ final class RanksPanel extends JPanel
 		availableCard.add(availableHeader, BorderLayout.NORTH);
 		availableCard.add(availableBody, BorderLayout.CENTER);
 
-		JPanel header = new JPanel();
 		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
 		identity.setAlignmentX(Component.LEFT_ALIGNMENT);
 		availableCard.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -114,7 +124,7 @@ final class RanksPanel extends JPanel
 		verifyRow.add(verify);
 		verifyRow.add(reset);
 		header.add(verifyRow);
-		header.add(Box.createVerticalStrut(4));
+		header.add(Box.createVerticalStrut(3));
 		specialTitle.setFont(specialTitle.getFont().deriveFont(Font.BOLD));
 		specialNotice.setForeground(new Color(180, 180, 180));
 		JPanel specialBody = new JPanel();
@@ -132,10 +142,12 @@ final class RanksPanel extends JPanel
 		header.add(specialCard);
 		header.add(availableCard);
 		header.add(Box.createVerticalStrut(3));
+		header.add(requestRank);
+		header.add(Box.createVerticalStrut(4));
 
 		JLabel nextTitle = new JLabel("Próximo objetivo");
 		nextTitle.setForeground(new Color(155, 155, 155));
-		nextRank.setFont(nextRank.getFont().deriveFont(Font.BOLD));
+		nextRank.setFont(RANK_NAME_FONT);
 		nextMissing.setForeground(new Color(165, 165, 165));
 		JPanel nextBody = new JPanel();
 		nextBody.setOpaque(false);
@@ -152,12 +164,12 @@ final class RanksPanel extends JPanel
 		nextBody.add(nextValue);
 		nextBody.add(Box.createVerticalStrut(3));
 		nextMissing.setAlignmentX(Component.LEFT_ALIGNMENT);
-		nextMissing.setMaximumSize(new Dimension(Integer.MAX_VALUE, 125));
+		nextMissing.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 		nextBody.add(nextMissing);
 		nextCard.setBorder(BorderFactory.createLineBorder(new Color(52, 52, 52)));
 		nextCard.add(nextBody, BorderLayout.CENTER);
 		nextCard.setAlignmentX(Component.LEFT_ALIGNMENT);
-		nextCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 145));
+		nextCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 		header.add(nextCard);
 
 		detected.setLayout(new BoxLayout(detected, BoxLayout.Y_AXIS));
@@ -168,27 +180,15 @@ final class RanksPanel extends JPanel
 		requirementsHeader.add(requirementsTitle, BorderLayout.NORTH);
 		helper.setForeground(new Color(155, 155, 155));
 		requirementsHeader.add(helper, BorderLayout.SOUTH);
-		JScrollPane detectedScroll = new JScrollPane(detected);
-		detectedScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-		detectedScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
-		detectedScroll.setBorder(BorderFactory.createEmptyBorder());
 		requirementsCard.setBorder(BorderFactory.createLineBorder(new Color(58, 58, 58)));
 		requirementsCard.add(requirementsHeader, BorderLayout.NORTH);
-		requirementsCard.add(detectedScroll, BorderLayout.CENTER);
-
-		requestRank = new JButton("Solicitar novo rank");
-		requestRank.setBackground(ORANGE);
-		requestRank.setForeground(Color.WHITE);
-		requestRank.setEnabled(false);
-		requestRank.setVisible(false);
-		requestRank.addActionListener(event -> requestRankAction.run());
-		JPanel actions = new JPanel(new BorderLayout(3, 3));
-		actions.add(requestRank, BorderLayout.CENTER);
-		actions.add(status, BorderLayout.SOUTH);
+		requirementsCard.add(detected, BorderLayout.CENTER);
 
 		add(header, BorderLayout.NORTH);
-		add(requirementsCard, BorderLayout.CENTER);
-		add(actions, BorderLayout.SOUTH);
+		JPanel body = new JPanel(new BorderLayout(0, 5));
+		body.add(requirementsCard, BorderLayout.NORTH);
+		add(body, BorderLayout.CENTER);
+		add(status, BorderLayout.SOUTH);
 	}
 
 	void update(String accountName, String clanRankName, String evaluatedRank, String nextRank,
@@ -212,9 +212,9 @@ final class RanksPanel extends JPanel
 			playerName.setText(accountName == null || accountName.trim().isEmpty() ? "Jogador" : accountName);
 			String safeClanRank = clanRankName == null || clanRankName.trim().isEmpty() ? "Não identificado" : clanRankName;
 			actualRank.setText("Rank atual • " + displayedClanRank(safeClanRank));
-			actualRankIcon.setIcon(clanRankIcon != null ? clanRankIcon : rankIconFor(safeClanRank));
+			actualRankIcon.setIcon(compactRankIcon(clanRankIcon != null ? clanRankIcon : rankIconFor(safeClanRank)));
 			availableTitle.setFont(availableTitle.getFont().deriveFont(Font.BOLD, 13f));
-			availableRank.setFont(availableRank.getFont().deriveFont(Font.BOLD, 14f));
+			availableRank.setFont(RANK_NAME_FONT);
 
 			boolean synchronizedData = isEligibleRank(evaluatedRank) || (evaluatedRank != null && !evaluatedRank.contains("não sincronizado"));
 			boolean unknownRank = normalize(safeClanRank).contains("não identificado") || normalize(safeClanRank).contains("carregando");
@@ -269,19 +269,19 @@ final class RanksPanel extends JPanel
 				requestTarget = evaluatedRank;
 				availableTitle.setText("Melhor rank disponível");
 				setWrappedText(availableRank, evaluatedRank);
-				availableRankIcon.setIcon(evaluatedRankIcon != null ? evaluatedRankIcon : rankIconFor(evaluatedRank));
+				availableRankIcon.setIcon(compactRankIcon(evaluatedRankIcon != null ? evaluatedRankIcon : rankIconFor(evaluatedRank)));
 				requirementsTitle.setText("Dados verificados");
 				helper.setText(wrapped("Confira abaixo os dados usados para calcular seu rank.", REQUIREMENT_TEXT_WIDTH));
 				setWrappedText(nextRank, nextRankName);
-				nextRankIcon.setIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor(nextRankName));
+				nextRankIcon.setIcon(compactRankIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor(nextRankName)));
 				nextMissing.setText(missingSummary(nextChecks));
 			}
 			else if (currentIndex == 0 && eligibleIndex < 2)
 			{
 				availableTitle.setText("Melhor rank disponível");
 				setWrappedText(availableRank, "Soldado • promoção automática");
-				availableRankIcon.setIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor("Soldado"));
-				nextRankIcon.setIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor("Soldado"));
+				availableRankIcon.setIcon(compactRankIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor("Soldado")));
+				nextRankIcon.setIcon(compactRankIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor("Soldado")));
 				requirementsTitle.setText("Promoção automática");
 				helper.setText(wrapped("Soldado é concedido após 30 dias no clã. Não é necessário solicitar.", REQUIREMENT_TEXT_WIDTH));
 				setWrappedText(nextRank, "Soldado • promoção automática");
@@ -292,8 +292,8 @@ final class RanksPanel extends JPanel
 				availableTitle.setText("Próximo cargo");
 				setWrappedText(availableRank, "General • somente via Discord");
 				Icon generalIcon = nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor("General");
-				availableRankIcon.setIcon(generalIcon);
-				nextRankIcon.setIcon(generalIcon);
+				availableRankIcon.setIcon(compactRankIcon(generalIcon));
+				nextRankIcon.setIcon(compactRankIcon(generalIcon));
 				requirementsTitle.setText("Progressão concluída");
 				helper.setText(wrapped("General é solicitado diretamente à staff pelo Discord.", REQUIREMENT_TEXT_WIDTH));
 				setWrappedText(nextRank, "General • somente via Discord");
@@ -304,14 +304,15 @@ final class RanksPanel extends JPanel
 				String target = nextRankName == null || nextRankName.trim().isEmpty()
 					? nextProgressionRank(safeClanRank) : nextRankName;
 				availableTitle.setText("Nenhum rank novo disponível");
-				availableRank.setFont(availableRank.getFont().deriveFont(Font.PLAIN, 13f));
+				availableTitle.setFont(COMPACT_DETAIL_TITLE_FONT);
+				availableRank.setFont(COMPACT_DETAIL_FONT);
 				setWrappedText(availableRank, "Conclua as pendências abaixo e verifique novamente.", BODY_TEXT_WIDTH);
 				availableRankIcon.setIcon(new RankIcon(Color.GRAY));
 				availableRankIcon.setVisible(false);
 				requirementsTitle.setText("Dados verificados");
 				helper.setText(wrapped("Confira o que foi detectado. Se algo estiver pendente, siga a instrução exibida.", REQUIREMENT_TEXT_WIDTH));
 				setWrappedText(nextRank, target == null ? "Próximo rank" : target);
-				nextRankIcon.setIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor(target));
+				nextRankIcon.setIcon(compactRankIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor(target)));
 				nextMissing.setText(missingSummary(nextChecks));
 			}
 
@@ -543,6 +544,40 @@ final class RanksPanel extends JPanel
 		return icon != null ? icon : new RankIcon(RankVisuals.rankColor(rankName));
 	}
 
+	private static Icon compactRankIcon(Icon icon)
+	{
+		if (icon == null || (icon.getIconWidth() == RANK_ICON_SIZE && icon.getIconHeight() == RANK_ICON_SIZE))
+		{
+			return icon;
+		}
+		return new ScaledIcon(icon, RANK_ICON_SIZE);
+	}
+
+	private static final class ScaledIcon implements Icon
+	{
+		private final Icon source;
+		private final double scale;
+
+		private ScaledIcon(Icon source, int maximumSize)
+		{
+			this.source = source;
+			this.scale = Math.min((double) maximumSize / Math.max(1, source.getIconWidth()),
+				(double) maximumSize / Math.max(1, source.getIconHeight()));
+		}
+
+		@Override public void paintIcon(Component component, Graphics graphics, int x, int y)
+		{
+			Graphics2D scaled = (Graphics2D) graphics.create();
+			scaled.translate(x, y);
+			scaled.scale(scale, scale);
+			source.paintIcon(component, scaled, 0, 0);
+			scaled.dispose();
+		}
+
+		@Override public int getIconWidth() { return (int) Math.ceil(source.getIconWidth() * scale); }
+		@Override public int getIconHeight() { return (int) Math.ceil(source.getIconHeight() * scale); }
+	}
+
 	private static final class RankIcon implements Icon
 	{
 		private final Color color;
@@ -550,12 +585,12 @@ final class RanksPanel extends JPanel
 		@Override public void paintIcon(Component component, Graphics graphics, int x, int y)
 		{
 			graphics.setColor(color);
-			graphics.fillOval(x + 3, y + 3, 18, 18);
+			graphics.fillOval(x + 2, y + 2, 9, 9);
 			graphics.setColor(Color.WHITE);
-			graphics.drawOval(x + 3, y + 3, 18, 18);
+			graphics.drawOval(x + 2, y + 2, 9, 9);
 		}
-		@Override public int getIconWidth() { return 24; }
-		@Override public int getIconHeight() { return 24; }
+		@Override public int getIconWidth() { return RANK_ICON_SIZE; }
+		@Override public int getIconHeight() { return RANK_ICON_SIZE; }
 	}
 
 	String getCurrentRank() { return requestCandidate; }
@@ -566,6 +601,19 @@ final class RanksPanel extends JPanel
 	String getDisplayedCurrentClanRank() { return actualRank.getText(); }
 	boolean isSpecialNoticeVisible() { return specialCard.isVisible(); }
 	boolean isProgressionVisible() { return availableCard.isVisible() && nextCard.isVisible() && requirementsCard.isVisible(); }
+	boolean isRequestButtonInHeader() { return requestRank.getParent() == header; }
+	boolean isRequestButtonImmediatelyAfterAvailableRank()
+	{
+		if (requestRank.getParent() != header || availableCard.getParent() != header) return false;
+		int availableIndex = header.getComponentZOrder(availableCard);
+		int requestIndex = header.getComponentZOrder(requestRank);
+		if (availableIndex < 0 || requestIndex <= availableIndex) return false;
+		for (int index = availableIndex + 1; index < requestIndex; index++)
+		{
+			if (!(header.getComponent(index) instanceof Box.Filler)) return false;
+		}
+		return true;
+	}
 	String getRequirementsDescription() { return helper.getText(); }
 	void setStatus(String text) { SwingUtilities.invokeLater(() -> status.setText(text)); }
 	void setRankRequestState(boolean pending, int cooldownSeconds)

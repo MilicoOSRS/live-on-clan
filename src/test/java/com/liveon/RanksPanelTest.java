@@ -8,6 +8,14 @@ import org.junit.Test;
 public class RanksPanelTest
 {
 	@Test
+	public void requestButtonStaysInHeaderNearVerificationActions()
+	{
+		RanksPanel panel = new RanksPanel(() -> { }, () -> { }, () -> { });
+		Assert.assertTrue(panel.isRequestButtonInHeader());
+		Assert.assertTrue(panel.isRequestButtonImmediatelyAfterAvailableRank());
+	}
+
+	@Test
 	public void recruitCanRequestHighestEligibleRank() throws Exception
 	{
 		RanksPanel panel = new RanksPanel(() -> { }, () -> { }, () -> { });
