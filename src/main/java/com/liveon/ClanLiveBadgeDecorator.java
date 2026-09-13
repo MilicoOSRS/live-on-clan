@@ -11,11 +11,13 @@ import net.runelite.client.util.Text;
 /** Keeps LIVE/MVP decorations inside the native clan member name widget. */
 final class ClanLiveBadgeDecorator
 {
+	private static final int REFRESH_INTERVAL_TICKS = 2;
 	private static final String MVP_MARKUP = " <col=ffc628>MVP</col>";
 	private static final String LIVE_MARKUP = " <col=96ffaa>LIVE</col>";
 
 	private final Client client;
 	private final ClanMessagesPlugin plugin;
+	private int lastRefreshTick = Integer.MIN_VALUE;
 
 	ClanLiveBadgeDecorator(Client client, ClanMessagesPlugin plugin)
 	{
@@ -25,6 +27,11 @@ final class ClanLiveBadgeDecorator
 
 	void refresh()
 	{
+		int currentTick = client.getTickCount();
+		if (lastRefreshTick != Integer.MIN_VALUE
+			&& currentTick >= lastRefreshTick
+			&& currentTick - lastRefreshTick < REFRESH_INTERVAL_TICKS) return;
+		lastRefreshTick = currentTick;
 		Widget playerList = client.getWidget(InterfaceID.ClansSidepanel.PLAYERLIST);
 		if (playerList == null || playerList.isHidden()) return;
 		Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());

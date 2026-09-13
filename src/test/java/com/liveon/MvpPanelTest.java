@@ -7,6 +7,24 @@ import org.junit.Test;
 public class MvpPanelTest
 {
 	@Test
+	public void rankingEntriesCompareDisplayedDataAndIgnorePositionChange()
+	{
+		com.google.gson.Gson gson = new com.google.gson.Gson();
+		MvpDropEntry first = gson.fromJson("{\"player_name\":\"Leader\",\"total_value\":12000000,"
+			+ "\"position\":1,\"top_drops\":[{\"item\":\"1x Fang\",\"value\":12000000,\"source\":\"Nex\"}]}",
+			MvpDropEntry.class);
+		MvpDropEntry same = gson.fromJson("{\"player_name\":\"Leader\",\"total_value\":12000000,"
+			+ "\"position\":1,\"top_drops\":[{\"item\":\"1x Fang\",\"value\":12000000,\"source\":\"Nex\"}]}",
+			MvpDropEntry.class);
+		MvpDropEntry changed = gson.fromJson("{\"player_name\":\"Leader\",\"total_value\":13000000,"
+			+ "\"position\":1,\"top_drops\":[{\"item\":\"1x Fang\",\"value\":13000000,\"source\":\"Nex\"}]}",
+			MvpDropEntry.class);
+		first.setPositionChange(2);
+		Assert.assertEquals(first, same);
+		Assert.assertNotEquals(first, changed);
+	}
+
+	@Test
 	public void populatedDropsKeepSourceTooltipsAndLimitToFive() throws Exception
 	{
 		StringBuilder json = new StringBuilder("{\"player_name\":\"Leader\",\"total_value\":12000000,\"top_drops\":[");
