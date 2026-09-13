@@ -42,6 +42,28 @@ public class DiscordLootFilterTest
 	}
 
 	@Test
+	public void zeroValueAllowlistedItemsWaitForChatValue()
+	{
+		assertTrue(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, null));
+		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, 12_000_000L));
+		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 12_000_000L, null));
+		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Rune platebody", 0, null));
+	}
+
+	@Test
+	public void bingoDeliveryDoesNotConsumeNormalFallbackAndSuppressesRepeat()
+	{
+		java.util.Map<String, Integer> bingo = new java.util.HashMap<>();
+		java.util.Map<String, Integer> normal = new java.util.HashMap<>();
+		java.util.List<String> item = Arrays.asList("magus vestigex1");
+		assertTrue(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, null));
+		assertTrue(ClanMessagesPlugin.claimDropFingerprint(bingo, "player", item, false, 100));
+		assertTrue(ClanMessagesPlugin.claimDropFingerprint(normal, "player", item, true, 102));
+		assertFalse(ClanMessagesPlugin.claimDropFingerprint(bingo, "player", item, false, 102));
+		assertTrue(ClanMessagesPlugin.claimDropFingerprint(bingo, "other", item, false, 102));
+	}
+
+	@Test
 	public void matchesTrailingWildcardVariants()
 	{
 		assertTrue(ClanMessagesPlugin.matchesDiscordFilter(
@@ -60,7 +82,7 @@ public class DiscordLootFilterTest
 		assertEquals("Araxyte fang", ClanMessagesPlugin.allowlistedCollectionItem(
 			"Collection log: Araxyte fang."));
 		assertNull(ClanMessagesPlugin.allowlistedCollectionItem(
-			"New item added to your collection log: Big bones"));
+			"New item added to your collection log: Rune platebody"));
 	}
 
 	@Test
@@ -77,7 +99,7 @@ public class DiscordLootFilterTest
 	public void ignoresValuableDropsOutsideAllowlist()
 	{
 		assertNull(ClanMessagesPlugin.allowlistedValuableDrop(
-			"Valuable drop: 1 x Big bones (4,000,000 coins)"));
+			"Valuable drop: 1 x Rune platebody (4,000,000 coins)"));
 	}
 
 	@Test

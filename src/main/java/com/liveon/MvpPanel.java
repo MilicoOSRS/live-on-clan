@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Properties;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -74,6 +75,8 @@ final class MvpPanel extends JPanel
 	private List<MvpEfficiencyEntry> liveEhpRanking = Collections.emptyList();
 	private MvpEfficiencyEntry liveOwnEhb;
 	private MvpEfficiencyEntry liveOwnEhp;
+	private String dropDataMonth;
+	private String efficiencyDataMonth;
 	private String expandedDropPlayer;
 	private String expandedEhbPlayer;
 	private String expandedEhpPlayer;
@@ -285,7 +288,13 @@ final class MvpPanel extends JPanel
 
 	synchronized void updateDropRanking(List<MvpDropEntry> ranking, MvpDropEntry own)
 	{
-		liveRanking = ranking == null ? Collections.emptyList() : new ArrayList<>(ranking);
+		List<MvpDropEntry> updatedRanking = ranking == null
+			? Collections.emptyList() : new ArrayList<>(ranking);
+		String month = clanMonth().toString();
+		if (month.equals(dropDataMonth) && updatedRanking.equals(liveRanking)
+			&& Objects.equals(own, liveOwnDrop)) return;
+		dropDataMonth = month;
+		liveRanking = updatedRanking;
 		liveOwnDrop = own;
 		applyDropPositionChanges(liveRanking, own);
 		renderDropRanking(liveRanking, own);
@@ -347,8 +356,17 @@ final class MvpPanel extends JPanel
 	synchronized void updateEfficiencyRankings(List<MvpEfficiencyEntry> ehb, MvpEfficiencyEntry ownEhb,
 		List<MvpEfficiencyEntry> ehp, MvpEfficiencyEntry ownEhp)
 	{
-		liveEhbRanking = ehb == null ? Collections.emptyList() : new ArrayList<>(ehb);
-		liveEhpRanking = ehp == null ? Collections.emptyList() : new ArrayList<>(ehp);
+		List<MvpEfficiencyEntry> updatedEhb = ehb == null
+			? Collections.emptyList() : new ArrayList<>(ehb);
+		List<MvpEfficiencyEntry> updatedEhp = ehp == null
+			? Collections.emptyList() : new ArrayList<>(ehp);
+		String month = clanMonth().toString();
+		if (month.equals(efficiencyDataMonth) && updatedEhb.equals(liveEhbRanking)
+			&& updatedEhp.equals(liveEhpRanking) && Objects.equals(ownEhb, liveOwnEhb)
+			&& Objects.equals(ownEhp, liveOwnEhp)) return;
+		efficiencyDataMonth = month;
+		liveEhbRanking = updatedEhb;
+		liveEhpRanking = updatedEhp;
 		liveOwnEhb = ownEhb;
 		liveOwnEhp = ownEhp;
 		applyEfficiencyPositionChanges("ehb", liveEhbRanking, ownEhb);

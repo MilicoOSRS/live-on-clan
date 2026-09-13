@@ -2,8 +2,10 @@ package com.liveon;
 
 import com.google.gson.annotations.SerializedName;
 import lombok.Getter;
+import lombok.EqualsAndHashCode;
 
 @Getter
+@EqualsAndHashCode
 final class MvpDropEntry
 {
 	@SerializedName("player_name")

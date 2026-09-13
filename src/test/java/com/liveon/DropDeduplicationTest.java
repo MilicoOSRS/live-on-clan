@@ -53,4 +53,39 @@ public class DropDeduplicationTest
 			ClanMessagesPlugin.standardizeKnownLootSource("Corrupted Hunllef"));
 		assertEquals("Vorkath", ClanMessagesPlugin.standardizeKnownLootSource("Vorkath"));
 	}
+
+	@Test
+	public void resolvesRaidModesFromRecentCompletionAnnouncements()
+	{
+		assertEquals("Chambers of Xeric: Challenge Mode", ClanMessagesPlugin.resolveDropSource(
+			"Chambers of Xeric", "EVENT", 100, 98, "Chambers of Xeric: Challenge Mode"));
+		assertEquals("Theatre of Blood Hard Mode", ClanMessagesPlugin.resolveDropSource(
+			"Theatre of Blood", "EVENT", 100, 99, "Theatre of Blood Hard Mode"));
+		assertEquals("Tombs of Amascut: Expert Mode", ClanMessagesPlugin.resolveDropSource(
+			"Tombs of Amascut", "EVENT", 100, 100, "Tombs of Amascut: Expert Mode"));
+	}
+
+	@Test
+	public void ignoresStaleOrUnrelatedRaidAnnouncements()
+	{
+		assertEquals("Chambers of Xeric", ClanMessagesPlugin.resolveDropSource(
+			"Chambers of Xeric", "EVENT", 100, 90, "Chambers of Xeric: Challenge Mode"));
+		assertEquals("Chambers of Xeric", ClanMessagesPlugin.resolveDropSource(
+			"Chambers of Xeric", "EVENT", 100, 99, "Tombs of Amascut: Expert Mode"));
+		assertEquals("Chambers of Xeric", ClanMessagesPlugin.resolveDropSource(
+			"Chambers of Xeric", "NPC", 100, 99, "Chambers of Xeric: Challenge Mode"));
+	}
+
+	@Test
+	public void normalizesTaggedAndSpecialLootSources()
+	{
+		assertEquals("The Gauntlet", ClanMessagesPlugin.resolveDropSource(
+			" <col=ff0000>Crystalline Hunllef</col>\u00a0 ", "EVENT", 100, -1000, ""));
+		assertEquals("Corrupted Gauntlet", ClanMessagesPlugin.resolveDropSource(
+			"Corrupted Hunllef", "EVENT", 100, -1000, ""));
+		assertEquals("Nex", ClanMessagesPlugin.resolveDropSource(
+			"  Nex  ", "NPC", 100, -1000, ""));
+		assertEquals("Loot", ClanMessagesPlugin.resolveDropSource(
+			" \u00a0 ", "EVENT", 100, -1000, ""));
+	}
 }

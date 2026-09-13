@@ -9,6 +9,22 @@ import static org.junit.Assert.assertEquals;
 public class PbPayloadTest
 {
 	@Test
+	public void mapsTobScoreboardVarbitOrder()
+	{
+		assertEquals("Normal", ClanMessagesPlugin.tobScoreboardMode(0));
+		assertEquals("Entry Mode", ClanMessagesPlugin.tobScoreboardMode(1));
+		assertEquals("Hard Mode", ClanMessagesPlugin.tobScoreboardMode(2));
+	}
+
+	@Test
+	public void mapsToaScoreboardVarbitOrder()
+	{
+		assertEquals("Normal", ClanMessagesPlugin.toaScoreboardMode(0));
+		assertEquals("Entry Mode", ClanMessagesPlugin.toaScoreboardMode(1));
+		assertEquals("Expert Mode", ClanMessagesPlugin.toaScoreboardMode(2));
+	}
+
+	@Test
 	public void recognizesRaidModeNameVariants()
 	{
 		assertRaid("Theatre of Blood: Hard Mode", "Theatre of Blood", "Hard Mode");
@@ -116,6 +132,21 @@ public class PbPayloadTest
 		assertAdventureRecord(records.get(1), "Hard Mode", 3, "OVERALL", 1339.80);
 		assertAdventureRecord(records.get(4), "Hard Mode", 5, "ROOM", 1008.60);
 		assertAdventureRecord(records.get(5), "Hard Mode", 5, "OVERALL", 1110.60);
+	}
+
+	@Test
+	public void preservesTobCategoryWhenPreparingScoreboardSubmission()
+	{
+		Map<String, Object> parsed = ClanMessagesPlugin.parseTobScoreboardPbs(
+			"Normal", Arrays.asList("-", "26:05", "-", "-", "-"),
+			Arrays.asList("-", "28:54", "-", "-", "-")).get(0);
+		Map<String, Object> payload = ClanMessagesPlugin.scoreboardPbPayload(parsed);
+
+		assertEquals("Theatre of Blood", payload.get("boss"));
+		assertEquals("Normal", payload.get("mode"));
+		assertEquals(2, payload.get("teamSize"));
+		assertEquals("ROOM", payload.get("timeType"));
+		assertEquals(1565.0, (Double) payload.get("seconds"), 0.001);
 	}
 
 	@Test

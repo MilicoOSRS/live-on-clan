@@ -193,6 +193,7 @@ public class ClanMessagesPlugin extends Plugin
 	@Inject private OverlayManager overlayManager;
 
 	private ScheduledExecutorService executor;
+	private volatile DropDeliveryClient dropDeliveryClient;
 	private ClanMessagesPanel panel;
 	private NavigationButton navigationButton;
 	// WOM membership cache: rsn (lowercase) -> CacheEntry
@@ -201,6 +202,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final long WOM_NEGATIVE_CACHE_TTL_SECONDS = 60;
 	private volatile okhttp3.Call currentWomCall = null;
 	private static final int VERIFY_COOLDOWN_SECONDS = 30;
+	private static final long RANK_BANK_SETTLE_MILLIS = 1000L;
 
 	private static final class CacheEntry { final boolean member; final String role; final long expiresAtMillis; CacheEntry(boolean m, String r, long e) { member=m; role=r; expiresAtMillis=e; } }
 	private ScheduledFuture<?> pollingTask;
@@ -243,6 +245,8 @@ public class ClanMessagesPlugin extends Plugin
 	private String questAccount = "";
 	private boolean rankSyncCompleted;
 	private boolean rankWidgetRefreshPending;
+	private ScheduledFuture<?> rankBankRefreshTask;
+	private final AtomicLong rankBankRefreshGeneration = new AtomicLong();
 	private int lastCombatAchievementRankRefreshTick = -1000;
 	private final java.util.Set<String> rankBankItems = new java.util.HashSet<>();
 	private final java.util.Set<Integer> rankBankItemIds = new java.util.HashSet<>();
@@ -267,6 +271,7 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Map<String, Integer> recentAllowlistedLootTicks = boundedDropMap();
 	private final java.util.Map<String, Integer> recentLootItemIds = boundedDropMap();
 	private final java.util.Map<String, Integer> recentDetectedDrops = boundedDropMap();
+	private final java.util.Map<String, Integer> recentBingoDrops = boundedDropMap();
 	private static final int DROP_DEDUP_TICKS = 8;
 	private String lastLootCountSource = "";
 	private int lastLootCount = -1;
@@ -332,6 +337,7 @@ public class ClanMessagesPlugin extends Plugin
 	protected void startUp()
 	{
 		executor = Executors.newSingleThreadScheduledExecutor();
+		dropDeliveryClient = new DropDeliveryClient(okHttpClient, clientThread, executor);
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		eventOverlay = new ClanEventOverlay(this);
@@ -367,6 +373,12 @@ public class ClanMessagesPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		cancelRankBankRefresh();
+		if (dropDeliveryClient != null)
+		{
+			dropDeliveryClient.close();
+			dropDeliveryClient = null;
+		}
 		connectionSessionGeneration.incrementAndGet();
 		if (manualBingo != null) { manualBingo.close(); manualBingo = null; }
 		resetPendingPet();
@@ -374,6 +386,7 @@ public class ClanMessagesPlugin extends Plugin
 		recentAllowlistedLootTicks.clear();
 		recentLootItemIds.clear();
 		recentDetectedDrops.clear();
+		recentBingoDrops.clear();
 		lastLootCountSource = "";
 		lastLootCount = -1;
 		lastLootCountTick = -1000;
@@ -806,12 +819,34 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if (!dropParticipationEnabled()) return;
 		List<ItemStack> grouped = groupDropStacks(items);
-		if (grouped.isEmpty() || !claimDetectedDrop(grouped, null)) return;
+		List<ItemStack> immediate = new ArrayList<>();
+		for (ItemStack item : grouped)
+		{
+			String itemName = itemManager.getItemComposition(item.getId()).getName();
+			long value = effectiveDropValue(item, grouped.size(), singleItemValueOverride);
+			if (shouldDeferZeroValueDrop(itemName, value, singleItemValueOverride))
+			{
+				// Retain the exact id for the subsequent official chat fallback.
+				recentLootItemIds.put(normalizeDropFilterValue(itemName), item.getId());
+				continue;
+			}
+			immediate.add(item);
+		}
+		if (grouped.isEmpty()) return;
+		boolean sendImmediate = !immediate.isEmpty() && claimDetectedDrop(immediate, null);
+		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
 		captureDetectedDrop(image -> {
 			String normalizedSource = standardizedDropSource(source, category);
-			notifyDiscordDrop(normalizedSource, grouped, category, npcId, singleItemValueOverride, image);
+			if (sendImmediate)
+				notifyDiscordDrop(normalizedSource, immediate, category, npcId, singleItemValueOverride, image);
 			notifyBingoDrops(normalizedSource, grouped, category, image);
 		});
+	}
+
+	static boolean shouldDeferZeroValueDrop(String itemName, long value, Long valueOverride)
+	{
+		return valueOverride == null && value <= 0
+			&& matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
 	}
 
 	private void rememberLootCount(String message)
@@ -832,13 +867,19 @@ public class ClanMessagesPlugin extends Plugin
 
 	private String standardizedDropSource(String source, String category)
 	{
+		return resolveDropSource(source, category, client.getTickCount(),
+			lastLootCountTick, lastLootCountSource);
+	}
+
+	static String resolveDropSource(String source, String category, int currentTick,
+		int announcedTick, String announcedSource)
+	{
 		String normalized = standardizeKnownLootSource(normalizeDropSource(source));
-		int currentTick = client.getTickCount();
-		if ("EVENT".equals(category) && currentTick >= lastLootCountTick
-			&& currentTick - lastLootCountTick <= DROP_DEDUP_TICKS
-			&& raidSourceMatches(normalized, lastLootCountSource))
+		if ("EVENT".equals(category) && currentTick >= announcedTick
+			&& currentTick - announcedTick <= DROP_DEDUP_TICKS
+			&& raidSourceMatches(normalized, announcedSource))
 		{
-			return lastLootCountSource;
+			return announcedSource;
 		}
 		return normalized;
 	}
@@ -965,10 +1006,18 @@ public class ClanMessagesPlugin extends Plugin
 			net.runelite.api.ItemComposition composition = itemManager.getItemComposition(item.getId());
 			String itemName = composition == null ? null : composition.getName();
 			if (itemName == null || manualBingo == null || !manualBingo.acceptsDrop(account, itemName)) continue;
+			if (!claimBingoDrop(itemName, item.getQuantity())) continue;
 			long value = (long) Math.max(0, itemManager.getItemPrice(item.getId())) * item.getQuantity();
 			sendDetectedDiscordDrop(new BingoDrop(itemName, item.getQuantity(), value, item.getId(), source, category),
 				screenshot, UUID.randomUUID().toString(), true);
 		}
+	}
+
+	private boolean claimBingoDrop(String itemName, int quantity)
+	{
+		return claimDropFingerprint(recentBingoDrops, normalizeDropFilterValue(authenticatedPlayerName),
+			java.util.Collections.singletonList(normalizeDropFilterValue(itemName) + "x" + quantity),
+			false, client.getTickCount());
 	}
 
 	private BingoDrop ownClanDrop(String message)
@@ -1284,7 +1333,8 @@ public class ClanMessagesPlugin extends Plugin
 					{
 						sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), false);
 					}
-					if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, fallback.itemName))
+					if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, fallback.itemName)
+						&& claimBingoDrop(fallback.itemName, fallback.quantity))
 					{
 						sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), true);
 					}
@@ -1371,6 +1421,7 @@ public class ClanMessagesPlugin extends Plugin
 		lastObservedRankTotalLevel = -1;
 		questAccount = "";
 		rankWidgetRefreshPending = false;
+		cancelRankBankRefresh();
 		rankSyncCompleted = false;
 		rankBankItems.clear();
 		rankBankItemIds.clear();
@@ -1392,12 +1443,51 @@ public class ClanMessagesPlugin extends Plugin
 			collectItemIds(event.getItemContainer(), rankBankItemIds);
 			rankBankLoaded = true;
 			rankSyncCompleted = true;
-			clientThread.invoke(() -> refreshRanksOnClientThread(true));
+			scheduleRankBankRefresh();
 		}
 		else if (event.getContainerId() == InventoryID.INV
 			|| event.getContainerId() == InventoryID.WORN)
 		{
 			refreshRanksAutomatically();
+		}
+	}
+
+	/**
+	 * Bank contents can arrive in several consecutive container updates while
+	 * the bank opens. Recalculate once after those updates settle.
+	 */
+	private synchronized void scheduleRankBankRefresh()
+	{
+		if (executor == null || executor.isShutdown()) return;
+		cancelRankBankRefresh();
+		long refreshGeneration = rankBankRefreshGeneration.get();
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
+		rankBankRefreshTask = executor.schedule(() ->
+		{
+			synchronized (ClanMessagesPlugin.this)
+			{
+				if (refreshGeneration != rankBankRefreshGeneration.get()) return;
+				rankBankRefreshTask = null;
+			}
+			clientThread.invokeLater(() ->
+			{
+				if (refreshGeneration == rankBankRefreshGeneration.get()
+					&& isCurrentConnectionSession(generation, account))
+				{
+					refreshRanksOnClientThread(true);
+				}
+			});
+		}, RANK_BANK_SETTLE_MILLIS, TimeUnit.MILLISECONDS);
+	}
+
+	private synchronized void cancelRankBankRefresh()
+	{
+		rankBankRefreshGeneration.incrementAndGet();
+		if (rankBankRefreshTask != null)
+		{
+			rankBankRefreshTask.cancel(false);
+			rankBankRefreshTask = null;
 		}
 	}
 
@@ -2194,6 +2284,7 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		String safeAccount = accountName == null ? "" : accountName;
 		if (safeAccount.equals(rankBankAccount)) return;
+		cancelRankBankRefresh();
 		rankBankAccount = safeAccount;
 		rankBankItems.clear();
 		rankBankItemIds.clear();
@@ -2468,36 +2559,8 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("extra", extra);
 
 		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""), bingo);
-		if (requestTemplate == null || executor == null || executor.isShutdown()) return;
-		executor.execute(() -> {
-		byte[] screenshotBytes = null;
-		if (screenshot instanceof BufferedImage)
-		{
-			try
-			{
-				ByteArrayOutputStream output = new ByteArrayOutputStream();
-				if (ImageIO.write((BufferedImage) screenshot, "png", output))
-				{
-					screenshotBytes = output.toByteArray();
-					Map<String, Object> image = new LinkedHashMap<>();
-					image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
-					embed.put("image", image);
-				}
-			}
-			catch (IOException | RuntimeException exception)
-			{
-				log.debug("Unable to prepare Bingo drop screenshot; sending without it", exception);
-			}
-		}
-		MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
-			.addFormDataPart("payload_json", gson.toJson(payload));
-		if (screenshotBytes != null)
-		{
-			multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
-				RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
-		}
-		sendDiscordRequestWithRetry(requestTemplate.newBuilder().post(multipart.build()).build(), 0, bingo);
-		});
+		deliverDiscordNotification(requestTemplate, payload, embed, screenshot,
+			DISCORD_LOOT_ATTACHMENT, bingo ? "Bingo drop notification" : "Discord drop notification");
 	}
 
 	private void submitDetectedDropStats(BingoDrop drop)
@@ -2512,40 +2575,6 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("drops", java.util.Collections.singletonList(validDrop));
 		payload.put("source", normalizeDropSource(drop.source));
 		submitDropPayload(gson.toJson(payload), 0);
-	}
-
-	private void sendDiscordRequestWithRetry(Request request, int attempt, boolean bingo)
-	{
-		okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
-		{
-			@Override public void onFailure(okhttp3.Call call, IOException exception)
-			{
-				log.debug("Unable to send {} drop notification", bingo ? "Bingo" : "Discord", exception);
-				retry();
-			}
-
-			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
-			{
-				try (Response ignored = response)
-				{
-					if (!response.isSuccessful())
-					{
-						log.debug("{} notification relay returned {}", bingo ? "Bingo" : "Discord", response.code());
-						if (response.code() == 429 || response.code() >= 500) retry();
-					}
-				}
-			}
-
-			private void retry()
-			{
-				if (executor == null || executor.isShutdown()) return;
-				long delay = Math.min(60L, 1L << Math.min(attempt, 6));
-				executor.schedule(() -> clientThread.invokeLater(() -> {
-					if (config.discordDropsEnabled() && dropParticipationEnabled())
-						sendDiscordRequestWithRetry(request, Math.min(1000, attempt + 1), bingo);
-				}), delay, TimeUnit.SECONDS);
-			}
-		});
 	}
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
@@ -2601,35 +2630,45 @@ public class ClanMessagesPlugin extends Plugin
 		extra.put("npcId", npcId);
 		payload.put("extra", extra);
 		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""));
+		deliverDiscordNotification(requestTemplate, payload, embed, screenshot,
+			DISCORD_LOOT_ATTACHMENT, "Discord drop notification");
+	}
+
+	private void deliverDiscordNotification(Request requestTemplate, Map<String, Object> payload,
+		Map<String, Object> embed, java.awt.Image screenshot, String attachmentName, String destination)
+	{
 		if (requestTemplate == null || executor == null || executor.isShutdown()) return;
+		long generation = connectionSessionGeneration.get();
+		String account = authenticatedPlayerName;
 		executor.execute(() -> {
-		byte[] screenshotBytes = null;
-		if (screenshot instanceof BufferedImage)
-		{
-			try
+			byte[] screenshotBytes = null;
+			if (screenshot instanceof BufferedImage)
 			{
-				ByteArrayOutputStream output = new ByteArrayOutputStream();
-				if (ImageIO.write((BufferedImage) screenshot, "png", output))
+				try
 				{
-					screenshotBytes = output.toByteArray();
-					Map<String, Object> image = new LinkedHashMap<>();
-					image.put("url", discordAttachmentUrl(DISCORD_LOOT_ATTACHMENT));
-					embed.put("image", image);
+					ByteArrayOutputStream output = new ByteArrayOutputStream();
+					if (ImageIO.write((BufferedImage) screenshot, "png", output))
+					{
+						screenshotBytes = output.toByteArray();
+					}
+				}
+				catch (IOException | RuntimeException exception)
+				{
+					log.debug("Unable to prepare {} screenshot; sending without it", destination, exception);
 				}
 			}
-			catch (IOException | RuntimeException exception)
+			DropMultipartPayload bodies = DropMultipartPayload.create(
+				gson, payload, embed, screenshotBytes, attachmentName);
+			DropDeliveryClient delivery = dropDeliveryClient;
+			if (delivery != null)
 			{
-				log.debug("Unable to prepare Discord drop screenshot; sending without it", exception);
+				delivery.send(
+					requestTemplate.newBuilder().post(bodies.initialBody).build(),
+					requestTemplate.newBuilder().post(bodies.retryBody).build(),
+					destination,
+					() -> isCurrentConnectionSession(generation, account)
+						&& config.discordDropsEnabled() && dropParticipationEnabled());
 			}
-		}
-		MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
-			.addFormDataPart("payload_json", gson.toJson(payload));
-		if (screenshotBytes != null)
-		{
-			multipart.addFormDataPart("file", DISCORD_LOOT_ATTACHMENT,
-				RequestBody.create(MediaType.parse("image/png"), screenshotBytes));
-		}
-		sendDiscordRequestWithRetry(requestTemplate.newBuilder().post(multipart.build()).build(), 0, false);
 		});
 	}
 
@@ -2860,18 +2899,13 @@ public class ClanMessagesPlugin extends Plugin
 			}
 		}
 		embed.put("fields", fields);
-		if (screenshot != null)
-		{
-			Map<String, Object> image = new LinkedHashMap<>();
-			image.put("url", discordAttachmentUrl(DISCORD_PET_ATTACHMENT));
-			embed.put("image", image);
-		}
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("content", "");
 		payload.put("tts", false);
 		payload.put("embeds", java.util.Collections.singletonList(embed));
 		payload.put("type", "PET");
 		payload.put("playerName", playerName);
+		payload.put("idempotencyKey", UUID.randomUUID().toString());
 		payload.put("accountType", String.valueOf(client.getAccountType()));
 		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
 		payload.put("dinkAccountHash", liveOnAccountHash(playerName));
@@ -2890,24 +2924,9 @@ public class ClanMessagesPlugin extends Plugin
 		if (petRarity != null) extra.put("rarity", petRarity);
 		extra.put("gameMessage", gameMessage);
 		payload.put("extra", extra);
-		try
-		{
-			MultipartBody.Builder multipart = new MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("payload_json", gson.toJson(payload));
-			if (screenshot != null)
-			{
-				ByteArrayOutputStream output = new ByteArrayOutputStream();
-				ImageIO.write((BufferedImage) screenshot, "png", output);
-				multipart.addFormDataPart("file", DISCORD_PET_ATTACHMENT,
-					RequestBody.create(MediaType.parse("image/png"), output.toByteArray()));
-			}
-			Request request = discordNotificationRequest(multipart.build());
-			if (request == null)
-			{
-				return;
-			}
-			okHttpClient.newCall(request).enqueue(new SilentCallback());
-		}
-		catch (IOException exception) { log.debug("Unable to prepare pet notification payload", exception); }
+		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""));
+		deliverDiscordNotification(requestTemplate, payload, embed, screenshot,
+			DISCORD_PET_ATTACHMENT, "Discord pet notification");
 	}
 
 	private Request discordNotificationRequest(RequestBody body)
@@ -3049,18 +3068,35 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		bossStatisticsBoardScanTicks = 0;
 		bossStatisticsBoardGroupIds.clear();
+		List<Map<String, Object>> submissions = new ArrayList<>();
+		List<String> signatures = new ArrayList<>();
 		for (Map<String, Object> parsed : parsedRecords)
 		{
-			String boss = (String) parsed.get("boss");
-			double seconds = (Double) parsed.get("seconds");
-			String detectedMode = (String) parsed.get("mode");
-			Map<String, Object> payload = pbPayload(
-				boss + (detectedMode == null || detectedMode.isEmpty() ? "" : " " + detectedMode), 0, seconds);
+			Map<String, Object> payload = scoreboardPbPayload(parsed);
+			double seconds = (Double) payload.get("seconds");
+			int teamSize = (Integer) payload.get("teamSize");
+			String timeType = (String) payload.get("timeType");
 			String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
-				+ payload.get("mode") + "\n" + seconds;
+				+ payload.get("mode") + "\n" + teamSize + "\n" + timeType + "\n" + seconds;
 			if (!submittedPbSignatures.add(signature)) continue;
-			submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds, signature);
+			submissions.add(payload);
+			signatures.add(signature);
 		}
+		if (!submissions.isEmpty()) submitPbBatch(submissions, signatures);
+	}
+
+	static Map<String, Object> scoreboardPbPayload(Map<String, Object> parsed)
+	{
+		String boss = (String) parsed.get("boss");
+		String detectedMode = (String) parsed.get("mode");
+		Number parsedTeamSize = (Number) parsed.get("teamSize");
+		int teamSize = parsedTeamSize == null ? 0 : parsedTeamSize.intValue();
+		double seconds = ((Number) parsed.get("seconds")).doubleValue();
+		Map<String, Object> payload = pbPayload(
+			boss + (detectedMode == null || detectedMode.isEmpty() ? "" : " " + detectedMode), teamSize, seconds);
+		Object timeType = parsed.get("timeType");
+		payload.put("timeType", timeType instanceof String ? timeType : "");
+		return payload;
 	}
 
 	static Map<String, Object> parseBossStatisticsBoardPb(List<String> widgetTexts)
@@ -3258,7 +3294,7 @@ public class ClanMessagesPlugin extends Plugin
 		Widget scoreboard = client.getWidget(InterfaceID.ToaScoreboard.UNIVERSE);
 		if (!isVisibleWidget(scoreboard)) return new ArrayList<>();
 		int selectedTab = client.getVarbitValue(VarbitID.TOA_SCOREBOARD_TAB);
-		String mode = selectedTab == 0 ? "Entry Mode" : selectedTab == 2 ? "Expert Mode" : "Normal";
+		String mode = toaScoreboardMode(selectedTab);
 		int[] personalOverallWidgets = {
 			InterfaceID.ToaScoreboard.DATA_SOLO_P_O,
 			InterfaceID.ToaScoreboard.DATA_2MAN_P_O,
@@ -3278,12 +3314,18 @@ public class ClanMessagesPlugin extends Plugin
 		return parseToaScoreboardPbs(mode, values);
 	}
 
+	static String toaScoreboardMode(int selectedTab)
+	{
+		// Like ToB, the varbit stores Normal before Entry despite the visual tab order.
+		return selectedTab == 1 ? "Entry Mode" : selectedTab == 2 ? "Expert Mode" : "Normal";
+	}
+
 	private List<Map<String, Object>> parseTobScoreboard()
 	{
 		Widget scoreboard = client.getWidget(InterfaceID.TobScoreboard.UNIVERSE);
 		if (!isVisibleWidget(scoreboard)) return new ArrayList<>();
 		int selectedTab = client.getVarbitValue(VarbitID.TOB_SCOREBOARD_TAB);
-		String mode = selectedTab == 0 ? "Entry Mode" : selectedTab == 2 ? "Hard Mode" : "Normal";
+		String mode = tobScoreboardMode(selectedTab);
 		int[] personalRoomWidgets = {
 			InterfaceID.TobScoreboard.DATA_SOLO_P_R,
 			InterfaceID.TobScoreboard.DATA_2MAN_P_R,
@@ -3306,6 +3348,13 @@ public class ClanMessagesPlugin extends Plugin
 			overallTimes.add(visibleWidgetText(personalOverallWidgets[index]));
 		}
 		return parseTobScoreboardPbs(mode, roomTimes, overallTimes);
+	}
+
+	static String tobScoreboardMode(int selectedTab)
+	{
+		// The varbit order is Normal, Entry, Hard even though the interface tabs
+		// are displayed as Entry, Normal, Hard.
+		return selectedTab == 1 ? "Entry Mode" : selectedTab == 2 ? "Hard Mode" : "Normal";
 	}
 
 	private String visibleWidgetText(int widgetId)
@@ -4594,10 +4643,16 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void submitPb(String boss, String mode, int teamSize, double seconds)
 	{
-		submitPb(boss, mode, teamSize, seconds, null);
+		submitPb(boss, mode, teamSize, seconds, "", null);
 	}
 
 	private void submitPb(String boss, String mode, int teamSize, double seconds, String combatAchievementSignature)
+	{
+		submitPb(boss, mode, teamSize, seconds, "", combatAchievementSignature);
+	}
+
+	private void submitPb(String boss, String mode, int teamSize, double seconds, String timeType,
+		String combatAchievementSignature)
 	{
 		if (!isPbParticipationEnabled() || boss == null || boss.trim().isEmpty() || authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty() || seconds <= 0) return;
@@ -4606,6 +4661,7 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("boss", boss.trim());
 		payload.put("mode", mode == null ? "" : mode.trim());
 		payload.put("teamSize", Math.max(0, teamSize));
+		payload.put("timeType", timeType == null ? "" : timeType.trim());
 		payload.put("seconds", seconds);
 		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
 		{
@@ -4644,16 +4700,27 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void submitPbBatch(List<Map<String, Object>> records)
 	{
+		submitPbBatch(records, java.util.Collections.emptyList());
+	}
+
+	private void submitPbBatch(List<Map<String, Object>> records, List<String> submittedSignatures)
+	{
 		if (!isPbParticipationEnabled() || records == null || records.isEmpty() || authenticatedPlayerName == null
-			|| authenticatedPlayerName.isEmpty()) return;
+			|| authenticatedPlayerName.isEmpty())
+		{
+			submittedPbSignatures.removeAll(submittedSignatures);
+			return;
+		}
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("playerName", authenticatedPlayerName);
 		payload.put("pbs", records);
+		payload.put("preserveBest", !submittedSignatures.isEmpty());
 		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
-				log.debug("Unable to import Adventure Log PBs", exception);
+				log.debug("Unable to import PB batch", exception);
+				submittedPbSignatures.removeAll(submittedSignatures);
 			}
 			@Override public void onResponse(okhttp3.Call call, Response response)
 			{
@@ -4663,7 +4730,11 @@ public class ClanMessagesPlugin extends Plugin
 					{
 						fetchPbCategories();
 					}
-					else log.debug("Adventure Log PB import returned HTTP {}", response.code());
+					else
+					{
+						log.debug("PB batch import returned HTTP {}", response.code());
+						submittedPbSignatures.removeAll(submittedSignatures);
+					}
 				}
 			}
 		});
@@ -4868,6 +4939,7 @@ public class ClanMessagesPlugin extends Plugin
 			recentAllowlistedLootTicks.clear();
 			recentLootItemIds.clear();
 			recentDetectedDrops.clear();
+			recentBingoDrops.clear();
 			lastLootCountSource = "";
 			lastLootCount = -1;
 			lastLootCountTick = -1000;
@@ -4875,6 +4947,7 @@ public class ClanMessagesPlugin extends Plugin
 			rankBankItemIds.clear();
 			rankBankAccount = "";
 			rankBankLoaded = false;
+			cancelRankBankRefresh();
 			lastObservedRankTotalLevel = -1;
 			rankRequestStatusKnown = false;
 			rankRequestPending = false;
