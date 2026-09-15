@@ -27,8 +27,18 @@ final class ClanLiveBadgeDecorator
 
 	void refresh()
 	{
+		refresh(false);
+	}
+
+	void refreshAfterRedraw()
+	{
+		refresh(true);
+	}
+
+	private void refresh(boolean force)
+	{
 		int currentTick = client.getTickCount();
-		if (lastRefreshTick != Integer.MIN_VALUE
+		if (!force && lastRefreshTick != Integer.MIN_VALUE
 			&& currentTick >= lastRefreshTick
 			&& currentTick - lastRefreshTick < REFRESH_INTERVAL_TICKS) return;
 		lastRefreshTick = currentTick;

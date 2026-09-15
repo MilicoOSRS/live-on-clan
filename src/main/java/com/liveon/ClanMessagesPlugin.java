@@ -58,6 +58,7 @@ import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.widgets.WidgetUtil;
@@ -665,6 +666,16 @@ public class ClanMessagesPlugin extends Plugin
 			pendingPetName = (pet == null ? clanMatcher.group("petOnly") : pet).trim();
 			String milestone = clanMatcher.group("milestone");
 			pendingPetMilestone = milestone == null ? null : milestone.replaceFirst("\\.$", "").trim();
+		}
+	}
+
+	@Subscribe
+	public void onScriptPostFired(ScriptPostFired event)
+	{
+		if (event.getScriptId() == ScriptID.CLAN_SIDEPANEL_DRAW
+			&& clanLiveBadgeDecorator != null)
+		{
+			clanLiveBadgeDecorator.refreshAfterRedraw();
 		}
 	}
 
