@@ -25,6 +25,7 @@ final class DropDeliveryClient implements AutoCloseable
 {
 	private static final int MAX_BACKOFF_EXPONENT = 6;
 	private static final long MAX_RETRY_DELAY_SECONDS = 60L;
+	private static final long RELAY_READ_TIMEOUT_SECONDS = 20L;
 
 	private final OkHttpClient httpClient;
 	private final Consumer<Runnable> onClientThread;
@@ -41,7 +42,12 @@ final class DropDeliveryClient implements AutoCloseable
 	DropDeliveryClient(OkHttpClient httpClient, Consumer<Runnable> onClientThread,
 		ScheduledExecutorService executor)
 	{
-		this.httpClient = httpClient;
+		// The clan server can wait up to 15 seconds for its Discord relay. RuneLite's
+		// shared client times out sooner, so give this isolated delivery client enough
+		// time to receive the server's definitive forwarded/failed response.
+		this.httpClient = httpClient.newBuilder()
+			.readTimeout(RELAY_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+			.build();
 		this.onClientThread = onClientThread;
 		this.executor = executor;
 	}
@@ -83,18 +89,23 @@ final class DropDeliveryClient implements AutoCloseable
 			}
 
 			@Override
-			public void onResponse(Call completedCall, Response response)
+			public void onResponse(Call completedCall, Response response) throws IOException
 			{
 				calls.remove(completedCall);
 				try (Response ignored = response)
 				{
+					String responseBody = response.body() == null ? "" : response.body().string();
 					if (!response.isSuccessful())
 					{
-						log.debug("{} delivery returned {}", destination, response.code());
+						log.debug("{} delivery returned {}: {}", destination, response.code(), responseBody);
 						if (response.code() == 429 || response.code() >= 500)
 						{
 							scheduleRetry(retryRequest, destination, retryAllowed, attempt);
 						}
+					}
+					else
+					{
+						log.debug("{} delivered (attempt {}): {}", destination, attempt + 1, responseBody);
 					}
 				}
 			}

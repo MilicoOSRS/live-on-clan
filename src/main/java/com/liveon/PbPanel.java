@@ -432,7 +432,9 @@ final class PbPanel extends JPanel
 	{
 		SwingUtilities.invokeLater(() -> {
 			availableCategories.clear();
-			if (values != null) availableCategories.addAll(values);
+			if (values != null)
+				for (PbCategory value : values)
+					if (value != null && PbCategory.isAllowed(value.boss, value.mode)) availableCategories.add(value);
 			filterGlobalSuggestions("");
 			rebuildBossLists();
 		});
@@ -490,7 +492,8 @@ final class PbPanel extends JPanel
 		for (PbCategory value : availableCategories)
 		{
 			if (safe(value.boss).equalsIgnoreCase(boss) && safe(value.mode).equalsIgnoreCase(mode)
-				&& value.team_size == teamSize && safe(value.time_type).equalsIgnoreCase(timeType)) return value;
+				&& sameTeamSize(value.team_size, teamSize)
+				&& safe(value.time_type).equalsIgnoreCase(timeType)) return value;
 		}
 		return null;
 	}
@@ -519,10 +522,13 @@ final class PbPanel extends JPanel
 		for (PbCategory category : availableCategories)
 			if (safe(category.boss).equalsIgnoreCase(boss) && safe(category.mode).equalsIgnoreCase(mode)) sizes.add(category.team_size);
 		List<String> labels = new ArrayList<>();
-		for (Integer size : sizes) if (size > 0) labels.add(size == 1 ? "Solo" : size + " jogadores");
+		boolean nightmare = "nightmare".equals(bossAlias(normalizeSearch(boss)));
+		boolean hasGroups = nightmare || sizes.stream().anyMatch(size -> size >= 2);
+		if (hasGroups && (sizes.contains(0) || sizes.contains(1))) labels.add("Solo");
+		for (Integer size : sizes) if (size >= 2) labels.add(size + " jogadores");
 		updatingFilters = true;
 		teams.setModel(new DefaultComboBoxModel<>(labels.toArray(new String[0])));
-		teams.setVisible(labels.size() > 1);
+		teams.setVisible(labels.size() > 1 || (nightmare && !labels.isEmpty()));
 		updatingFilters = false;
 		filters.setVisible(modes.isVisible() || teams.isVisible());
 		rebuildTimeTypeFilter(boss, mode, teams.isVisible() ? parseTeamLabel(selectedText(teams)) : singleTeam(boss, mode));
@@ -534,14 +540,14 @@ final class PbPanel extends JPanel
 		java.util.Set<String> types = new java.util.LinkedHashSet<>();
 		for (PbCategory category : availableCategories)
 			if (safe(category.boss).equalsIgnoreCase(boss) && safe(category.mode).equalsIgnoreCase(mode)
-				&& category.team_size == teamSize && !safe(category.time_type).isEmpty())
+				&& sameTeamSize(category.team_size, teamSize) && !safe(category.time_type).isEmpty())
 				types.add(category.time_type);
 		List<String> labels = new ArrayList<>();
 		if (types.contains("ROOM")) labels.add("Room time");
 		if (types.contains("OVERALL")) labels.add("Overall time");
 		updatingFilters = true;
 		timeTypes.setModel(new DefaultComboBoxModel<>(labels.toArray(new String[0])));
-		timeTypes.setVisible("Theatre of Blood".equalsIgnoreCase(boss) && labels.size() > 1);
+		timeTypes.setVisible(labels.size() > 1);
 		updatingFilters = false;
 	}
 
@@ -564,17 +570,28 @@ final class PbPanel extends JPanel
 
 	private String resolveBossName(String query)
 	{
+		return resolveBossName(query, availableCategories);
+	}
+
+	static String resolveBossName(String query, List<PbCategory> categories)
+	{
 		String normalizedQuery = normalizeSearch(query);
 		if (normalizedQuery.isEmpty()) return "";
 		String alias = bossAlias(normalizedQuery);
-		for (PbCategory category : availableCategories)
+		for (PbCategory category : categories)
 		{
 			String candidate = safe(category.boss);
+			if (!PbCategory.isAllowed(candidate)) continue;
 			String normalizedCandidate = normalizeSearch(candidate);
 			if (normalizedCandidate.equals(normalizedQuery)
-				|| normalizedCandidate.equals(alias)
-				|| normalizedCandidate.contains(alias)
-				|| normalizedCandidate.contains(normalizedQuery)) return candidate;
+				|| bossAlias(normalizedCandidate).equals(alias)) return candidate;
+		}
+		// Do not substitute Phosani when normal Nightmare has no records.
+		if ("nightmare".equals(alias)) return "";
+		for (PbCategory category : categories)
+		{
+			String candidate = safe(category.boss);
+			if (PbCategory.isAllowed(candidate) && normalizeSearch(candidate).contains(alias)) return candidate;
 		}
 		return query;
 	}
@@ -609,7 +626,7 @@ final class PbPanel extends JPanel
 			case "vork": return "vorkath";
 			case "mole": return "giant mole";
 			case "phantom": case "muspah": case "pm": return "phantom muspah";
-			case "nm": case "tnm": case "nmare": case "the nightmare": return "nightmare";
+			case "nightmare normal": case "the nightmare normal": case "nm": case "tnm": case "nmare": case "the nightmare": return "nightmare";
 			case "pnm": case "phosani": case "phosanis": case "phosani nm": return "phosani s nightmare";
 			case "sara": case "saradomin": case "zily": case "zilyana": return "commander zilyana";
 			case "zammy": case "zamorak": case "kril": return "k ril tsutsaroth";
@@ -653,8 +670,13 @@ final class PbPanel extends JPanel
 	{
 		for (PbCategory value : availableCategories)
 			if (safe(value.boss).equalsIgnoreCase(boss) && safe(value.mode).equalsIgnoreCase(mode)
-				&& value.team_size == teamSize) return safe(value.time_type);
+				&& sameTeamSize(value.team_size, teamSize)) return safe(value.time_type);
 		return "";
+	}
+
+	static boolean sameTeamSize(int first, int second)
+	{
+		return first == second || (first <= 1 && second <= 1);
 	}
 
 	private static String selectedText(JComboBox<String> combo)
@@ -664,7 +686,7 @@ final class PbPanel extends JPanel
 
 	private static int parseTeamLabel(String label)
 	{
-		if ("Solo".equalsIgnoreCase(label)) return 1;
+		if ("Solo".equalsIgnoreCase(label)) return 0;
 		java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(\\d+)").matcher(label);
 		return matcher.find() ? Integer.parseInt(matcher.group(1)) : 0;
 	}

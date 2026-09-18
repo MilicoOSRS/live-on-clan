@@ -119,11 +119,14 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern PB_KILLCOUNT_PATTERN = Pattern.compile(
 		"Your (?<pre>completion count for |subdued |completed )?(?<boss>.+?) (?<post>(?:(?:kill|harvest|lap|completion|success|Total Ticket) )?(?:count )?)is: ?(?<kc>[0-9,]+)",
 		Pattern.CASE_INSENSITIVE);
+	private static final Pattern PB_RAID_TOTAL_PATTERN = Pattern.compile(
+		"^(?<boss>Tombs of Amascut(?::? (?:Expert Mode|Entry Mode))?) total completion time: (?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)", Pattern.CASE_INSENSITIVE);
 	private static final Pattern PB_NEW_TIME_PATTERN = Pattern.compile(
-		"(?i)(?:(?:Fight |Lap |Challenge |Corrupted challenge )?duration:|Subdued in|(?<!total )completion time:).*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)</col> \\(new personal best\\)");
+		"(?i)(?:(?:Fight |Lap |Challenge |Corrupted challenge )?duration:|Subdued in|(?<!total )completion time:).*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)");
 	private static final Pattern PB_RAID_PATTERN = Pattern.compile(
-		"Team size:.*?" + PB_TEAM_SIZE + ".*?Duration:.*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)</col> \\(new personal best\\)",
+		"Team size:.*?" + PB_TEAM_SIZE + ".*?Duration:.*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)",
 		Pattern.CASE_INSENSITIVE);
+	private static final long RAID_LOOT_CONTEXT_WAIT_MILLIS = 1500L;
 	private static final Pattern ADVENTURE_LOG_TITLE_PATTERN = Pattern.compile("The Exploits of (.+)");
 	private static final Pattern ADVENTURE_LOG_PB_PATTERN = Pattern.compile(
 		"^Fastest (?<kind>kill|run|Room time|Overall time)"
@@ -259,6 +262,8 @@ public class ClanMessagesPlugin extends Plugin
 	private boolean adventureLogMenuLoaded;
 	private boolean adventureLogCountersLoaded;
 	private String adventureLogOwner;
+	private String lastAdventureLogContentSignature = "";
+	private int adventureLogRetryTick;
 	private String pendingPbBoss;
 	private double pendingPbSeconds = -1;
 	private int pendingPbTeamSize;
@@ -275,6 +280,7 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Map<String, Integer> recentLootItemIds = boundedDropMap();
 	private final java.util.Map<String, Integer> recentDetectedDrops = boundedDropMap();
 	private final java.util.Map<String, Integer> recentBingoDrops = boundedDropMap();
+	private final RaidLootContext raidLootContext = new RaidLootContext();
 	private String lastLootCountSource = "";
 	private int lastLootCount = -1;
 	private int lastLootCountTick = -1000;
@@ -389,6 +395,7 @@ public class ClanMessagesPlugin extends Plugin
 		recentLootItemIds.clear();
 		recentDetectedDrops.clear();
 		recentBingoDrops.clear();
+		clearPendingCaptures();
 		lastLootCountSource = "";
 		lastLootCount = -1;
 		lastLootCountTick = -1000;
@@ -576,13 +583,17 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
-		if (event.getType() == ChatMessageType.GAMEMESSAGE)
+		if (event.getType() == ChatMessageType.GAMEMESSAGE
+			|| event.getType() == ChatMessageType.FRIENDSCHATNOTIFICATION)
 		{
 			rememberLootCount(message);
 			if (isPbParticipationEnabled())
 			{
-				capturePersonalBest(event.getMessage(), message);
+				capturePersonalBest(message);
 			}
+		}
+		if (event.getType() == ChatMessageType.GAMEMESSAGE)
+		{
 			PendingAllowlistedDrop valuableDrop = parsedValuableDrop(message);
 			if (valuableDrop != null
 				&& !message.toLowerCase(java.util.Locale.ROOT).startsWith("untradeable drop:")
@@ -851,14 +862,50 @@ public class ClanMessagesPlugin extends Plugin
 			immediate.add(item);
 		}
 		if (grouped.isEmpty()) return;
+		String eventSource = standardizeKnownLootSource(normalizeDropSource(source));
+		RaidLootContext.Completion completion = raidLootContext.take(eventSource, category, client.getTickCount());
+		String normalizedSource = completion == null ? eventSource : completion.source;
+		Integer killCount = completion == null ? readDropKillCount(category, normalizedSource) : completion.count;
+		if (RaidLootContext.isRaid(eventSource))
+		{
+			log.debug("Raid loot received: eventSource={}, resolvedSource={}, kc={}, minimumValue={}",
+					eventSource, normalizedSource, killCount, Math.max(0, config.discordDropMinimumValue()));
+		}
 		boolean sendImmediate = !immediate.isEmpty()
 			&& (chatFallback || claimDetectedDrop(immediate));
 		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
 		captureDetectedDrop(image -> {
-			String normalizedSource = standardizedDropSource(source, category);
-			if (sendImmediate)
-				notifyDiscordDrop(normalizedSource, immediate, category, npcId, singleItemValueOverride, image, chatFallback);
-			notifyBingoDrops(normalizedSource, grouped, category, image);
+			long deliveryGeneration = connectionSessionGeneration.get();
+			String deliveryAccount = authenticatedPlayerName;
+			Runnable delivery = () -> {
+				if (!isCurrentConnectionSession(deliveryGeneration, deliveryAccount)) return;
+				RaidLootContext.Completion ready = completion != null ? completion
+					: raidLootContext.take(eventSource, category, client.getTickCount());
+				String deliverySource = ready == null ? normalizedSource : ready.source;
+				Integer deliveryCount = ready == null ? killCount : ready.count;
+				if (RaidLootContext.isRaid(eventSource))
+				{
+					log.debug("Raid loot delivery: eventSource={}, deliverySource={}, kc={}",
+						eventSource, deliverySource, deliveryCount);
+				}
+				if (sendImmediate)
+					notifyDiscordDrop(deliverySource, immediate, category, npcId, singleItemValueOverride,
+						image, chatFallback, deliveryCount);
+				notifyBingoDrops(deliverySource, grouped, category, image);
+			};
+			// RuneLite can publish the generic raid loot event before its mode-specific
+			// completion message. Give that message a short, non-blocking window to arrive.
+			if (completion == null && RaidLootContext.isGenericRaid(eventSource)
+				&& executor != null && !executor.isShutdown())
+			{
+				executor.schedule(() -> clientThread.invokeLater(() -> {
+					if (dropParticipationEnabled()) delivery.run();
+				}), RAID_LOOT_CONTEXT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+			}
+			else
+			{
+				delivery.run();
+			}
 		});
 	}
 
@@ -877,30 +924,12 @@ public class ClanMessagesPlugin extends Plugin
 			lastLootCountSource = normalizeDropSource(matcher.group("boss"));
 			lastLootCount = Integer.parseInt(matcher.group("kc").replace(",", ""));
 			lastLootCountTick = client.getTickCount();
+			raidLootContext.remember(lastLootCountSource, lastLootCount, lastLootCountTick);
 		}
 		catch (NumberFormatException ignored)
 		{
 			lastLootCount = -1;
 		}
-	}
-
-	private String standardizedDropSource(String source, String category)
-	{
-		return resolveDropSource(source, category, client.getTickCount(),
-			lastLootCountTick, lastLootCountSource);
-	}
-
-	static String resolveDropSource(String source, String category, int currentTick,
-		int announcedTick, String announcedSource)
-	{
-		String normalized = standardizeKnownLootSource(normalizeDropSource(source));
-		if ("EVENT".equals(category) && currentTick >= announcedTick
-			&& currentTick - announcedTick <= DROP_DEDUP_TICKS
-			&& raidSourceMatches(normalized, announcedSource))
-		{
-			return announcedSource;
-		}
-		return normalized;
 	}
 
 	static String standardizeKnownLootSource(String source)
@@ -1076,7 +1105,7 @@ public class ClanMessagesPlugin extends Plugin
 				{
 					notifyDiscordDrop(drop.source,
 						java.util.Collections.singletonList(new ItemStack(drop.itemId, drop.quantity)),
-						drop.category, null, drop.totalValue, image, true);
+						drop.category, null, drop.totalValue, image, true, readDropKillCount(drop.category, drop.source));
 				}
 				else if (config.discordDropsEnabled()
 					&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, drop.itemName)
@@ -1120,7 +1149,7 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category,
-		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, boolean chatFallback)
+		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, boolean chatFallback, Integer dropKillCount)
 	{
 		if (items.isEmpty() || isTemporaryLootWorld()) return;
 		long totalValue = 0;
@@ -1208,7 +1237,6 @@ public class ClanMessagesPlugin extends Plugin
 		final int dropThumbnailItemId = thumbnailItemId;
 		final long dropTotalValue = notifiedValue;
 		final Double dropRarestProbability = rarestProbability;
-		final Integer dropKillCount = readDropKillCount(category, sourceName);
 		sendDiscordDrop(playerName, description, dropThumbnailItemId, sourceName, category, npcId,
 			dinkItems, dropTotalValue, dropKillCount, dropRarestProbability, screenshot);
 	}
@@ -1531,10 +1559,12 @@ public class ClanMessagesPlugin extends Plugin
 		if (groupId == InterfaceID.MENU || groupId == InterfaceID.MENU_NEW)
 		{
 			adventureLogMenuLoaded = true;
+			lastAdventureLogContentSignature = "";
 		}
 		else if (groupId == InterfaceID.JOURNALSCROLL)
 		{
 			adventureLogCountersLoaded = true;
+			lastAdventureLogContentSignature = "";
 		}
 		if (groupId == InterfaceID.ACCOUNT || groupId == InterfaceID.ACCOUNT_SUMMARY_SIDEPANEL
 			|| groupId == InterfaceID.QUESTLIST)
@@ -2749,6 +2779,8 @@ public class ClanMessagesPlugin extends Plugin
 	private Integer readDropKillCount(String category, String source)
 	{
 		if (source == null || source.trim().isEmpty()) return null;
+		// Generic raid names cannot establish the mode of this chest.
+		if (RaidLootContext.isRaid(source)) return null;
 		int currentTick = client.getTickCount();
 		if (currentTick >= lastLootCountTick && currentTick - lastLootCountTick <= DROP_DEDUP_TICKS
 			&& source.equalsIgnoreCase(lastLootCountSource) && lastLootCount > 0)
@@ -3158,10 +3190,17 @@ public class ClanMessagesPlugin extends Plugin
 		String boss = (String) parsed.get("boss");
 		double seconds = (Double) parsed.get("seconds");
 		Map<String, Object> payload = pbPayload(boss, 0, seconds);
+		if (requiresExplicitPbTeamSize((String) payload.get("boss"))) return;
 		String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
 			+ payload.get("mode") + "\n" + seconds;
 		if (!submittedPbSignatures.add(signature)) return;
 		submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds, signature);
+	}
+
+	static boolean requiresExplicitPbTeamSize(String boss)
+	{
+		return "Chambers of Xeric".equals(boss) || "Theatre of Blood".equals(boss)
+			|| "Tombs of Amascut".equals(boss) || "The Nightmare".equals(boss);
 	}
 
 	private void armCombatAchievementPbScanForVisiblePage()
@@ -3372,7 +3411,7 @@ public class ClanMessagesPlugin extends Plugin
 			catch (NumberFormatException ignored) { continue; }
 			if (seconds <= 0) continue;
 			Map<String, Object> record = pbPayload(recordedBoss, index + 1, seconds);
-			record.put("timeType", "");
+			record.put("timeType", "OVERALL");
 			records.add(record);
 		}
 		return records;
@@ -3478,7 +3517,21 @@ public class ClanMessagesPlugin extends Plugin
 		pendingPetTicks = 0;
 	}
 
-	private void capturePersonalBest(String rawMessage, String plainMessage)
+	private void clearPendingCaptures()
+	{
+		adventureLogOwner = null;
+		adventureLogMenuLoaded = false;
+		adventureLogCountersLoaded = false;
+		lastAdventureLogContentSignature = "";
+		adventureLogRetryTick = 0;
+		raidLootContext.clear();
+		pendingPbBoss = null;
+		pendingPbSeconds = -1;
+		pendingPbTeamSize = 0;
+		pendingPbTick = -1;
+	}
+
+	private void capturePersonalBest(String plainMessage)
 	{
 		Matcher kill = PB_KILLCOUNT_PATTERN.matcher(plainMessage);
 		if (kill.find())
@@ -3499,14 +3552,20 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 
-		Matcher raid = PB_RAID_PATTERN.matcher(rawMessage);
-		Matcher time = PB_NEW_TIME_PATTERN.matcher(rawMessage);
-		Matcher matched = raid.find() ? raid : (time.find() ? time : null);
-		if (matched == null) return;
-		double seconds = parsePbTime(matched.group("pb"));
-		int teamSize = 0;
-		try { teamSize = parseTeamSize(matched.group("teamsize")); }
-		catch (IllegalArgumentException ignored) { }
+		Map<String, Object> newPb = parseChatNewPb(plainMessage);
+		if (newPb == null) return;
+		double seconds = (Double) newPb.get("seconds");
+		int teamSize = (Integer) newPb.get("teamSize");
+		if (newPb.containsKey("boss"))
+		{
+			Map<String, Object> values = pbPayload((String) newPb.get("boss"), toaTeamSize(), seconds);
+			submitPb((String) values.get("boss"), (String) values.get("mode"),
+				(Integer) values.get("teamSize"), seconds, "OVERALL", null);
+			pendingPbBoss = null;
+			pendingPbSeconds = -1;
+			pendingPbTick = -1;
+			return;
+		}
 		if (pendingPbBoss != null && pendingPbTick >= 0 && client.getTickCount() - pendingPbTick <= 5)
 		{
 			submitCategorizedPb(pendingPbBoss, teamSize, seconds);
@@ -3521,79 +3580,160 @@ public class ClanMessagesPlugin extends Plugin
 		}
 	}
 
+	static Map<String, Object> parseChatNewPb(String message)
+	{
+		if (message == null) return null;
+		message = Text.removeTags(message).replace('\u00a0', ' ').trim();
+		Matcher total = PB_RAID_TOTAL_PATTERN.matcher(message);
+		if (total.find())
+		{
+			Map<String, Object> result = new LinkedHashMap<>();
+			result.put("boss", total.group("boss"));
+			result.put("seconds", parsePbTime(total.group("pb")));
+			result.put("teamSize", 0);
+			return result;
+		}
+		Matcher raid = PB_RAID_PATTERN.matcher(message);
+		Matcher time = PB_NEW_TIME_PATTERN.matcher(message);
+		boolean raidMatch = raid.find();
+		Matcher matched = raidMatch ? raid : (time.find() ? time : null);
+		if (matched == null) return null;
+		Map<String, Object> result = new LinkedHashMap<>();
+		result.put("seconds", parsePbTime(matched.group("pb")));
+		result.put("teamSize", raidMatch ? parseTeamSize(matched.group("teamsize")) : 0);
+		return result;
+	}
+
 	private void processAdventureLog()
 	{
 		if (client.getLocalPlayer() == null) return;
 		if (adventureLogMenuLoaded)
 		{
-			adventureLogMenuLoaded = false;
+			adventureLogOwner = null;
 			Widget menu = client.getWidget(InterfaceID.Menu.LJ_LAYER2);
 			if (menu != null && menu.getChild(1) != null)
 			{
 				Matcher title = ADVENTURE_LOG_TITLE_PATTERN.matcher(Text.removeTags(menu.getChild(1).getText()));
-				if (title.find()) adventureLogOwner = title.group(1).trim();
+				if (title.find())
+				{
+					adventureLogOwner = title.group(1).trim();
+					adventureLogMenuLoaded = false;
+				}
 			}
 		}
 		if (!adventureLogCountersLoaded) return;
-		adventureLogCountersLoaded = false;
-		if (adventureLogOwner == null || !WomMembership.normalizePlayerName(adventureLogOwner)
-			.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName()))) return;
 		Widget parent = client.getWidget(InterfaceID.Journalscroll.TEXTLAYER);
-		if (parent == null || parent.getStaticChildren() == null) return;
+		if (parent == null || parent.isHidden() || parent.getStaticChildren() == null)
+		{
+			lastAdventureLogContentSignature = "";
+			return;
+		}
 		Widget[] children = parent.getStaticChildren();
 		List<String> lines = new ArrayList<>();
 		for (Widget child : children) lines.add(Text.removeTags(child.getText()).trim());
+		String contentSignature = String.join("\u0000", lines);
+		if (client.getTickCount() < adventureLogRetryTick || authenticatedPlayerName == null
+			|| authenticatedPlayerName.isEmpty()) return;
+		if (contentSignature.equals(lastAdventureLogContentSignature)) return;
+		String localName = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+		String visibleOwner = adventureLogOwnerFromLines(lines);
+		boolean ownLog = isOwnAdventureLog(localName, visibleOwner, adventureLogOwner);
+		if (!ownLog) return;
+		lastAdventureLogContentSignature = contentSignature;
 		List<Map<String, Object>> records = parseAdventureLogPbs(lines);
 		if (!records.isEmpty())
 		{
-			submitPbBatch(records);
+			long generation = connectionSessionGeneration.get();
+			String account = authenticatedPlayerName;
+			submitPbBatch(records, java.util.Collections.emptyList(), () -> clientThread.invokeLater(() -> {
+				if (isCurrentConnectionSession(generation, account)
+					&& contentSignature.equals(lastAdventureLogContentSignature))
+				{
+					lastAdventureLogContentSignature = "";
+					adventureLogRetryTick = client.getTickCount() + 10;
+				}
+			}));
 		}
+	}
+
+	static String adventureLogOwnerFromLines(List<String> lines)
+	{
+		if (lines == null) return "";
+		String first = "";
+		for (String rawLine : lines)
+		{
+			String line = Text.removeTags(rawLine == null ? "" : rawLine).trim();
+			if (line.isEmpty()) continue;
+			if (first.isEmpty()) first = line;
+			Matcher title = ADVENTURE_LOG_TITLE_PATTERN.matcher(line);
+			if (title.find()) return title.group(1).trim();
+		}
+		return first;
+	}
+
+	static boolean isOwnAdventureLog(String localName, String visibleOwner, String menuOwner)
+	{
+		String normalizedLocal = WomMembership.normalizePlayerName(localName);
+		String normalizedMenu = WomMembership.normalizePlayerName(menuOwner);
+		if (!normalizedMenu.isEmpty()) return normalizedLocal.equals(normalizedMenu);
+		return normalizedLocal.equals(WomMembership.normalizePlayerName(visibleOwner));
 	}
 
 	static List<Map<String, Object>> parseAdventureLogPbs(List<String> lines)
 	{
 		Map<String, Map<String, Object>> uniqueRecords = new LinkedHashMap<>();
 		if (lines == null) return new ArrayList<>();
-		for (int index = 0; index < lines.size(); index++)
+		String boss = "";
+		Map<String, Object> pending = null;
+		for (String rawLine : lines)
 		{
-			String boss = lines.get(index) == null ? "" : lines.get(index).trim();
-			if (boss.isEmpty()) continue;
-			Map<String, Object> pending = null;
-			for (index++; index < lines.size(); index++)
+			String line = rawLine == null ? "" : rawLine.trim();
+			if (line.isEmpty())
 			{
-				String line = lines.get(index) == null ? "" : lines.get(index).trim();
-				if (line.isEmpty()) break;
-				Matcher descriptor = ADVENTURE_LOG_PB_PATTERN.matcher(line);
-				if (descriptor.matches())
+				pending = null;
+				continue;
+			}
+			Matcher descriptor = ADVENTURE_LOG_PB_PATTERN.matcher(line);
+			if (descriptor.matches() && !boss.isEmpty())
+			{
+				String details = descriptor.group("details");
+				String recordedBoss = raidModeFromAdventureDetails(boss, details);
+				int teamSize = parseTeamSize(details);
+				pending = pbPayload(recordedBoss, teamSize, -1);
+				if (details == null && requiresExplicitPbTeamSize((String) pending.get("boss")))
 				{
-					String details = descriptor.group("details");
-					String recordedBoss = raidModeFromAdventureDetails(boss, details);
-					int teamSize = parseTeamSize(details);
-					pending = pbPayload(recordedBoss, teamSize, -1);
-					String kind = descriptor.group("kind");
-					if ("Theatre of Blood".equals(pending.get("boss")))
-					{
-						pending.put("timeType", kind.equalsIgnoreCase("Room time") ? "ROOM"
-							: kind.equalsIgnoreCase("Overall time") ? "OVERALL" : "");
-					}
-					else pending.put("timeType", "");
-					String inlineTime = descriptor.group("time");
-					if (inlineTime != null && !inlineTime.isEmpty())
-					{
-						pending.put("seconds", parsePbTime(inlineTime));
-						putAdventureRecord(uniqueRecords, pending);
-						pending = null;
-					}
+					pending = null;
 					continue;
 				}
-				Matcher timeOnly = ADVENTURE_LOG_TIME_ONLY_PATTERN.matcher(line);
-				if (pending != null && timeOnly.matches())
+				String kind = descriptor.group("kind");
+				pending.put("timeType", kind.equalsIgnoreCase("Room time") ? "ROOM"
+					: kind.equalsIgnoreCase("Overall time") ? "OVERALL" : "");
+				String inlineTime = descriptor.group("time");
+				if (inlineTime != null && !inlineTime.isEmpty())
 				{
-					pending.put("seconds", parsePbTime(timeOnly.group("time")));
+					pending.put("seconds", parsePbTime(inlineTime));
 					putAdventureRecord(uniqueRecords, pending);
 					pending = null;
 				}
+				continue;
 			}
+			Matcher timeOnly = ADVENTURE_LOG_TIME_ONLY_PATTERN.matcher(line);
+			if (pending != null && timeOnly.matches())
+			{
+				pending.put("seconds", parsePbTime(timeOnly.group("time")));
+				putAdventureRecord(uniqueRecords, pending);
+				pending = null;
+				continue;
+			}
+			// Unsupported counter statistics are labels, never activity names. In
+			// particular, Jad Challenge wave rows must not become PB categories.
+			if (line.regionMatches(true, 0, "Fastest ", 0, "Fastest ".length()))
+			{
+				pending = null;
+				continue;
+			}
+			boss = line;
+			pending = null;
 		}
 		return new ArrayList<>(uniqueRecords.values());
 	}
@@ -3632,7 +3772,8 @@ public class ClanMessagesPlugin extends Plugin
 			else if (recordedBoss.contains("Theatre of Blood")) teamSize = tobTeamSize();
 		}
 		Map<String, Object> values = pbPayload(recordedBoss, teamSize, seconds);
-		submitPb((String) values.get("boss"), (String) values.get("mode"), teamSize, seconds);
+		submitPb((String) values.get("boss"), (String) values.get("mode"),
+			(Integer) values.get("teamSize"), seconds);
 	}
 
 	private int tobTeamSize()
@@ -3707,6 +3848,7 @@ public class ClanMessagesPlugin extends Plugin
 			}
 		}
 		if (canonicalRaid != null) boss = canonicalRaid;
+		if (teamSize == 1) teamSize = 0;
 		Map<String, Object> result = new LinkedHashMap<>();
 		result.put("boss", boss);
 		result.put("mode", mode);
@@ -3767,9 +3909,11 @@ public class ClanMessagesPlugin extends Plugin
 	private static int parseTeamSize(String value)
 	{
 		if (value == null || value.trim().isEmpty()) return 0;
-		if ("solo".equalsIgnoreCase(value.trim()) || value.trim().startsWith("1 ")) return 1;
-		Matcher number = Pattern.compile("^(\\d+)").matcher(value.trim());
-		return number.find() ? Integer.parseInt(number.group(1)) : 0;
+		Matcher size = Pattern.compile("(?i)(?:team size:\\s*)?(solo|\\d+)(?:\\+|-\\d+)?(?:\\s*players?)?")
+			.matcher(value.trim());
+		if (!size.find() || "solo".equalsIgnoreCase(size.group(1))) return 0;
+		int players = Integer.parseInt(size.group(1));
+		return players <= 1 ? 0 : players;
 	}
 
 	private static double parsePbTime(String value)
@@ -4649,7 +4793,8 @@ public class ClanMessagesPlugin extends Plugin
 	private void submitPb(String boss, String mode, int teamSize, double seconds, String timeType,
 		String combatAchievementSignature)
 	{
-		if (!isPbParticipationEnabled() || boss == null || boss.trim().isEmpty() || authenticatedPlayerName == null
+		if (!isPbParticipationEnabled() || !PbCategory.isAllowed(boss, mode) || boss.trim().isEmpty()
+			|| authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty() || seconds <= 0) return;
 		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
 		payload.put("playerName", authenticatedPlayerName);
@@ -4693,12 +4838,13 @@ public class ClanMessagesPlugin extends Plugin
 		return config.enabled() && config.pbRankingEnabled();
 	}
 
-	private void submitPbBatch(List<Map<String, Object>> records)
+	private void submitPbBatch(List<Map<String, Object>> records, List<String> submittedSignatures)
 	{
-		submitPbBatch(records, java.util.Collections.emptyList());
+		submitPbBatch(records, submittedSignatures, () -> {});
 	}
 
-	private void submitPbBatch(List<Map<String, Object>> records, List<String> submittedSignatures)
+	private void submitPbBatch(List<Map<String, Object>> records, List<String> submittedSignatures,
+		Runnable onFailure)
 	{
 		if (!isPbParticipationEnabled() || records == null || records.isEmpty() || authenticatedPlayerName == null
 			|| authenticatedPlayerName.isEmpty())
@@ -4708,13 +4854,22 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("playerName", authenticatedPlayerName);
-		payload.put("pbs", records);
-		payload.put("preserveBest", !submittedSignatures.isEmpty());
+		List<Map<String, Object>> allowedRecords = new ArrayList<>();
+		for (Map<String, Object> record : records)
+			if (PbCategory.isAllowed((String) record.get("boss"), (String) record.get("mode"))) allowedRecords.add(record);
+		if (allowedRecords.isEmpty())
+		{
+			submittedPbSignatures.removeAll(submittedSignatures);
+			return;
+		}
+		payload.put("pbs", allowedRecords);
+		payload.put("preserveBest", true);
 		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
 				log.debug("Unable to import PB batch", exception);
+				onFailure.run();
 				submittedPbSignatures.removeAll(submittedSignatures);
 			}
 			@Override public void onResponse(okhttp3.Call call, Response response)
@@ -4728,6 +4883,7 @@ public class ClanMessagesPlugin extends Plugin
 					else
 					{
 						log.debug("PB batch import returned HTTP {}", response.code());
+						onFailure.run();
 						submittedPbSignatures.removeAll(submittedSignatures);
 					}
 				}
@@ -4922,6 +5078,10 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
+		if (event.getGameState() == GameState.LOGIN_SCREEN || event.getGameState() == GameState.HOPPING)
+		{
+			clearPendingCaptures();
+		}
 		if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			configurePolling();
