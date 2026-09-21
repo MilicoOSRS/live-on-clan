@@ -1,6 +1,7 @@
 package com.liveon;
 
 import java.util.Arrays;
+import java.util.regex.Matcher;
 import org.junit.Test;
 
 import static org.junit.Assert.assertFalse;
@@ -115,5 +116,72 @@ public class DiscordLootFilterTest
 			"Untradeable drop: Future untradeable reward (2,500,000 coins)");
 		assertEquals("Future untradeable reward", generic.itemName);
 		assertEquals(Long.valueOf(2_500_000L), generic.totalValue);
+	}
+
+	@Test
+	public void recognizesClanClueItemAnnouncements()
+	{
+		Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(
+			"Milico received a clue item: 3rd Age platelegs (73,347,961 coins).");
+		assertTrue(matcher.matches());
+		assertEquals("Milico", matcher.group("player"));
+		assertEquals("received a clue item", matcher.group("kind"));
+		assertEquals("3rd Age platelegs", matcher.group("item"));
+		assertEquals("73,347,961", matcher.group("value"));
+	}
+
+	@Test
+	public void separatesClanDropValueAndSourceSuffix()
+	{
+		Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(
+			"Iron Slyfer received a drop: Araxyte fang (50,000,000 coins) from Araxxor.");
+		assertTrue(matcher.matches());
+		assertEquals("Araxyte fang", matcher.group("item"));
+		assertEquals("50,000,000", matcher.group("value"));
+		assertEquals("Araxxor", matcher.group("source"));
+	}
+
+	@Test
+	public void parsesClanDropFormatMatrixWithoutLosingValues()
+	{
+		String[][] cases = {
+			{"Player received a drop: Virtus robe top (31,486,550 coins) from Vardorvis", "Virtus robe top", "31,486,550", "Vardorvis", null},
+			{"Player received a drop: 2 x Dragon platelegs (3,200,000 coins) from Rune dragon.", "Dragon platelegs", "3,200,000", "Rune dragon", "2"},
+			{"Player received a valuable drop: Zenyte shard (16,791,892 coins).", "Zenyte shard", "16,791,892", null, null},
+			{"Player received special loot from a raid: Dexterous prayer scroll (15,454,422 coins).", "Dexterous prayer scroll", "15,454,422", null, null},
+			{"Player received a clue item: 3rd age platelegs (73,347,961 coins).", "3rd age platelegs", "73,347,961", null, null},
+			{"Player received a new collection log item: Rock golem.", "Rock golem", null, null, null}
+		};
+		for (String[] expected : cases)
+		{
+			Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(expected[0]);
+			assertTrue(expected[0], matcher.matches());
+			assertEquals(expected[1], matcher.group("item"));
+			assertEquals(expected[2], matcher.group("value"));
+			assertEquals(expected[3], matcher.group("source"));
+			assertEquals(expected[4], matcher.group("quantity"));
+		}
+	}
+
+	@Test
+	public void parsesClueCompletionBeforeRewardWidgetLoads()
+	{
+		java.util.Map.Entry<String, Integer> clue = ClanMessagesPlugin.parseClueCompletion(
+			"You have completed 320 hard Treasure Trails.");
+		assertEquals("hard", clue.getKey());
+		assertEquals(Integer.valueOf(320), clue.getValue());
+		assertNull(ClanMessagesPlugin.parseClueCompletion(
+			"Your treasure is worth around 73,479,532 coins!"));
+	}
+
+	@Test
+	public void parsesCollectionLogPopupAsASecondDetectionSignal()
+	{
+		assertEquals("3rd age platelegs", ClanMessagesPlugin.collectionPopupItem(
+			"Collection log", "New item: 3rd age platelegs"));
+		assertNull(ClanMessagesPlugin.collectionPopupItem(
+			"Combat Achievement", "New item: 3rd age platelegs"));
+		assertNull(ClanMessagesPlugin.collectionPopupItem(
+			"Collection log", "Something else"));
 	}
 }

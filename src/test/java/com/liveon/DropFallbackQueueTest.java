@@ -79,6 +79,15 @@ public class DropFallbackQueueTest
 	}
 
 	@Test
+	public void lateNormalLootDoesNotDuplicateAnAlreadySentFallback()
+	{
+		DropNotificationHistory history = new DropNotificationHistory(8);
+		assertTrue(history.admit("player", "discord", "Zenyte shard", 1, 103, true));
+		assertFalse(history.admit("player", "discord", "Zenyte shard", 1, 104, false));
+		assertTrue(history.admit("player", "discord", "Rune platebody", 1, 104, false));
+	}
+
+	@Test
 	public void normalLootCanArriveOnAnyTickBeforeFallbackDeadline()
 	{
 		for (int lootTick = 100; lootTick <= 103; lootTick++)

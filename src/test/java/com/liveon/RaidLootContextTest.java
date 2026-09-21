@@ -27,11 +27,20 @@ public class RaidLootContextTest
 		RaidLootContext context = new RaidLootContext();
 		context.remember("Tombs of Amascut: Expert Mode", 5, 100);
 		assertNull(context.take("Chambers of Xeric", "EVENT", 101));
-		assertNull(context.take("Tombs of Amascut", "EVENT", 1101));
+		assertNull(context.take("Tombs of Amascut", "EVENT", 111));
 
 		context.remember("Theatre of Blood: Hard Mode", 6, 200);
 		context.clear();
 		assertNull(context.take("Theatre of Blood", "EVENT", 201));
+	}
+
+	@Test
+	public void staleChallengeModeCannotRelabelALaterNormalCoxChest()
+	{
+		RaidLootContext context = new RaidLootContext();
+		context.remember("Chambers of Xeric: Challenge Mode", 20, 100);
+
+		assertNull(context.take("Chambers of Xeric", "EVENT", 111));
 	}
 
 	@Test

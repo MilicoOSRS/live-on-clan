@@ -6,7 +6,10 @@ import java.util.Map;
 /** Recent raid completions waiting for their matching chest. */
 final class RaidLootContext
 {
-	static final int MAX_AGE_TICKS = 1000;
+	// The completion-count message and the raid chest loot belong to the same
+	// completion and arrive only a few ticks apart. Keeping this short prevents
+	// an unconsumed CM/HM/Expert message from relabelling a later normal raid.
+	static final int MAX_AGE_TICKS = 10;
 	private static final String[] RAIDS = {
 		"Chambers of Xeric", "Theatre of Blood", "Tombs of Amascut"
 	};

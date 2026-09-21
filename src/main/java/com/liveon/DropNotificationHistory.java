@@ -27,13 +27,11 @@ final class DropNotificationHistory
 	{
 		String key = normalize(account) + "|" + destination + "|" + normalize(item) + "|" + quantity;
 		Integer previous = queued.get(key);
-		if (fallback && previous != null && tick >= previous
+		if (previous != null && tick >= previous
 			&& tick - previous <= duplicateWindowTicks)
 		{
 			return false;
 		}
-		// A new direct loot event is authoritative; never discard it because a
-		// fallback or another event contained the same item recently.
 		queued.put(key, tick);
 		return true;
 	}

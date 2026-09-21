@@ -56,7 +56,7 @@ final class DropDeliveryClient implements AutoCloseable
 		BooleanSupplier retryAllowed)
 	{
 		onClientThread.accept(() -> {
-			if (!closed.get() && retryAllowed.getAsBoolean())
+			if (!closed.get())
 			{
 				send(initialRequest, retryRequest, destination, retryAllowed, 0);
 			}
@@ -98,7 +98,15 @@ final class DropDeliveryClient implements AutoCloseable
 					if (!response.isSuccessful())
 					{
 						log.debug("{} delivery returned {}: {}", destination, response.code(), responseBody);
-						if (response.code() == 429 || response.code() >= 500)
+						if (response.code() == 413 && request != retryRequest)
+						{
+							// Preserve the notification when a proxy rejects only its screenshot.
+							send(retryRequest, retryRequest, destination, retryAllowed,
+								Math.min(1000, attempt + 1));
+							return;
+						}
+						if (response.code() == 408 || response.code() == 425
+							|| response.code() == 429 || response.code() >= 500)
 						{
 							scheduleRetry(retryRequest, destination, retryAllowed, attempt);
 						}

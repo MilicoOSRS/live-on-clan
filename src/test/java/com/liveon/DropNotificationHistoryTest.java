@@ -35,13 +35,13 @@ public class DropNotificationHistoryTest
 	}
 
 	@Test
-	public void fallbackFirstNeverBlocksLaterDirectLootOrAdditionalItems()
+	public void fallbackFirstBlocksDuplicateDirectLootButNotAdditionalItems()
 	{
 		DropNotificationHistory history = new DropNotificationHistory(8);
 		assertTrue(history.admit("player", "discord", "Zenyte shard", 1, 100, true));
-		assertTrue(history.admit("player", "discord", "Zenyte shard", 1, 101, false));
+		assertFalse(history.admit("player", "discord", "Zenyte shard", 1, 101, false));
 		assertTrue(history.admit("player", "discord", "Rune platebody", 1, 101, false));
-		assertTrue(history.admit("player", "discord", "Zenyte shard", 1, 102, false));
+		assertFalse(history.admit("player", "discord", "Zenyte shard", 1, 102, false));
 	}
 
 	@Test
