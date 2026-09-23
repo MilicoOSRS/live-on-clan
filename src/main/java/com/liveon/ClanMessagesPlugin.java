@@ -12,6 +12,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,8 +41,8 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.NpcID;
 import net.runelite.api.gameval.VarbitID;
-import net.runelite.api.gameval.VarClientID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageBuilder;
@@ -108,16 +109,8 @@ public class ClanMessagesPlugin extends Plugin
 	private static final Pattern PET_UNTRADEABLE_PATTERN = Pattern.compile("Untradeable drop: (.+)", Pattern.CASE_INSENSITIVE);
 	private static final Pattern PET_COLLECTION_PATTERN = Pattern.compile(
 		"(?:New item added to your collection log|Collection log):\\s*(.+)", Pattern.CASE_INSENSITIVE);
-	private static final Pattern VALUABLE_DROP_PATTERN = Pattern.compile(
-		"(Valuable drop|Untradeable drop):\\s*(?:(\\d+)\\s*x\\s*)?(.+?)\\s*\\(([0-9,]+)\\s+coins?\\)\\s*\\.?$",
-		Pattern.CASE_INSENSITIVE);
 	private static final Pattern CLUE_COMPLETION_PATTERN = Pattern.compile(
 		"You have completed (?<count>[0-9,]+) (?<tier>\\w+) Treasure Trails?\\.",
-		Pattern.CASE_INSENSITIVE);
-	static final Pattern CLAN_DROP_PATTERN = Pattern.compile(
-		"^(?<player>.+?) (?<kind>received a drop|received a valuable drop|received a clue item|received special loot from a raid|received a new collection log item): "
-			+ "(?:(?<quantity>[0-9,]+) x )?(?<item>.+?)(?: \\((?<value>[0-9,]+) coins?\\))?"
-			+ "(?: from (?<source>.+?))?\\.?$",
 		Pattern.CASE_INSENSITIVE);
 	private static final String PB_TEAM_SIZE = "(?<teamsize>\\d+(?:\\+|-\\d+)? players?|Solo)";
 	private static final Pattern PB_KILLCOUNT_PATTERN = Pattern.compile(
@@ -131,6 +124,8 @@ public class ClanMessagesPlugin extends Plugin
 		"Team size:.*?" + PB_TEAM_SIZE + ".*?Duration:.*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)",
 		Pattern.CASE_INSENSITIVE);
 	private static final long RAID_LOOT_CONTEXT_WAIT_MILLIS = 1500L;
+	private static final long CLUE_WIDGET_FALLBACK_WAIT_MILLIS = 1500L;
+	private static final long MVP_DROP_MINIMUM_VALUE = 1_000_000L;
 	private static final Pattern ADVENTURE_LOG_TITLE_PATTERN = Pattern.compile("The Exploits of (.+)");
 	private static final Pattern ADVENTURE_LOG_PB_PATTERN = Pattern.compile(
 		"^Fastest (?<kind>kill|run|Room time|Overall time)"
@@ -146,8 +141,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
 	// Drop exceptions modelled after Dink's loot filters. A trailing '*' matches
-	// item variants. Collection-log messages provide a fallback when RuneLite
-	// does not emit a normal loot event for one of these items.
+	// item variants. Official RuneLite loot events remain the source of truth.
 	private static final List<String> DROP_ITEM_ALLOWLIST = java.util.Arrays.asList(
 		"enhanced crystal weapon seed",
 		"crystal armour seed",
@@ -166,6 +160,34 @@ public class ClanMessagesPlugin extends Plugin
 	private static final List<String> DISCORD_SOURCE_DENYLIST = java.util.Arrays.asList(
 		"loot chest",
 		"bird nest"
+	);
+	private static final Set<Integer> SERVER_LOOT_NPC_IDS = Set.of(
+		NpcID.YAMA,
+		NpcID.HESPORI,
+		NpcID.SAILING_BULL_SHARK_DEAD,
+		NpcID.SAILING_HAMMERHEAD_SHARK_DEAD,
+		NpcID.SAILING_TIGER_SHARK_DEAD,
+		NpcID.SAILING_GREAT_WHITE_SHARK_DEAD,
+		NpcID.SAILING_NARWHAL_DEAD,
+		NpcID.SAILING_ORCA_DEAD,
+		NpcID.SAILING_PYGMY_KRAKEN_DEAD,
+		NpcID.SAILING_SPINED_KRAKEN_DEAD,
+		NpcID.SAILING_ARMOURED_KRAKEN_DEAD,
+		NpcID.SAILING_VAMPYRE_KRAKEN_DEAD,
+		NpcID.SAILING_EAGLE_RAY_DEAD,
+		NpcID.SAILING_BUTTERFLY_RAY_DEAD,
+		NpcID.SAILING_STINGRAY_DEAD,
+		NpcID.SAILING_MANTA_RAY_DEAD,
+		NpcID.SAILING_OSPREY_DEAD,
+		NpcID.SAILING_ALBATROSS_DEAD,
+		NpcID.SAILING_FRIGATEBIRD_DEAD,
+		NpcID.SAILING_TERN_DEAD,
+		NpcID.SAILING_SEA_MOGRE_DEAD,
+		NpcID.SAILING_DOLPHIN_DEAD,
+		NpcID.SAILING_VEILED_KRAKEN_DEAD,
+		NpcID.MAGGOT_KING,
+		NpcID.MAGGOT_KING_CORPSE,
+		16305, 16306, 16307, 16308, 16309, 16310, 16311, 16312, 16313, 16314, 16315
 	);
 
 	// Mapping Portuguese rank names (lowercase) to clan title names used in-game
@@ -278,12 +300,7 @@ public class ClanMessagesPlugin extends Plugin
 	private String visibleCombatAchievementPage = "";
 	private int bossStatisticsBoardScanTicks;
 	private final java.util.LinkedHashSet<Integer> bossStatisticsBoardGroupIds = new java.util.LinkedHashSet<>();
-	private static final int DROP_FALLBACK_DELAY_TICKS = 3;
 	private static final int DROP_DEDUP_TICKS = 8;
-	private final DropNotificationHistory dropNotificationHistory = new DropNotificationHistory(DROP_DEDUP_TICKS);
-	private final DropFallbackQueue dropFallbackQueue = new DropFallbackQueue(DROP_FALLBACK_DELAY_TICKS);
-	private final java.util.Map<String, Integer> recentLootItemIds = boundedDropMap();
-	private final java.util.Map<String, Integer> recentDetectedDrops = boundedDropMap();
 	private final java.util.Map<String, Integer> recentBingoDrops = boundedDropMap();
 	private final RaidLootContext raidLootContext = new RaidLootContext();
 	private String lastLootCountSource = "";
@@ -292,7 +309,8 @@ public class ClanMessagesPlugin extends Plugin
 	private String pendingClueTier = "";
 	private int pendingClueCount = -1;
 	private int pendingClueTicks;
-	private boolean collectionPopupStarted;
+	private boolean pendingClueReward;
+	private final ClueRewardGate clueRewardGate = new ClueRewardGate();
 
 	private static <T> java.util.Map<String, T> boundedDropMap()
 	{
@@ -304,20 +322,6 @@ public class ClanMessagesPlugin extends Plugin
 				return size() > 128;
 			}
 		};
-	}
-
-	static final class PendingAllowlistedDrop
-	{
-		final String itemName;
-		int quantity;
-		Long totalValue;
-
-		private PendingAllowlistedDrop(String itemName, int quantity, Long totalValue)
-		{
-			this.itemName = itemName;
-			this.quantity = Math.max(1, quantity);
-			this.totalValue = totalValue;
-		}
 	}
 
 	static final class BingoDrop
@@ -400,10 +404,6 @@ public class ClanMessagesPlugin extends Plugin
 		connectionSessionGeneration.incrementAndGet();
 		if (manualBingo != null) { manualBingo.close(); manualBingo = null; }
 		resetPendingPet();
-		dropNotificationHistory.clear();
-		dropFallbackQueue.clear();
-		recentLootItemIds.clear();
-		recentDetectedDrops.clear();
 		recentBingoDrops.clear();
 		clearPendingCaptures();
 		lastLootCountSource = "";
@@ -603,35 +603,15 @@ public class ClanMessagesPlugin extends Plugin
 				capturePersonalBest(message);
 			}
 		}
-		if (event.getType() == ChatMessageType.GAMEMESSAGE)
+		if (event.getType() == ChatMessageType.GAMEMESSAGE
+			&& !"runelite".equalsIgnoreCase(event.getName()))
 		{
-			PendingAllowlistedDrop valuableDrop = parsedValuableDrop(message);
-			if (valuableDrop != null
-				&& !message.toLowerCase(java.util.Locale.ROOT).startsWith("untradeable drop:")
-				&& !matchesDiscordFilter(DROP_ITEM_ALLOWLIST, valuableDrop.itemName)
-				&& !(valuableDrop.totalValue != null && config.statsEnabled()
-					&& valuableDrop.totalValue >= 1_000_000L)
-				&& !(valuableDrop.totalValue != null && config.discordDropsEnabled()
-					&& valuableDrop.totalValue >= Math.max(0, config.discordDropMinimumValue()))
-				&& (manualBingo == null || !manualBingo.acceptsDrop(authenticatedPlayerName, valuableDrop.itemName)))
+			Map.Entry<String, Integer> exceptionalLoot = exceptionalGameMessageLoot(message);
+			if (exceptionalLoot != null)
 			{
-				valuableDrop = null;
-			}
-			if (valuableDrop != null)
-			{
-				scheduleAllowlistedDropFallback(valuableDrop);
-			}
-			else
-			{
-				queueCollectionFallbackIfEligible(collectionItem(message));
-			}
-		}
-		else if (event.getType() == ChatMessageType.CLAN_MESSAGE)
-		{
-			BingoDrop clanDrop = ownClanDrop(message);
-			if (clanDrop != null)
-			{
-				scheduleBingoDrop(clanDrop);
+				detectLoot(exceptionalLoot.getKey(),
+					java.util.Collections.singletonList(new ItemStack(exceptionalLoot.getValue(), 1)),
+					LootRecordType.EVENT.name(), null, null);
 			}
 		}
 		if (event.getType() == ChatMessageType.GAMEMESSAGE && PET_TRIGGER_PATTERN.matcher(message).matches())
@@ -695,17 +675,6 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onScriptPreFired(ScriptPreFired event)
 	{
-		if (event.getScriptId() == ScriptID.NOTIFICATION_START)
-		{
-			collectionPopupStarted = true;
-		}
-		else if (event.getScriptId() == ScriptID.NOTIFICATION_DELAY && collectionPopupStarted)
-		{
-			collectionPopupStarted = false;
-			queueCollectionFallbackIfEligible(collectionPopupItem(
-				client.getVarcStrValue(VarClientID.NOTIFICATION_TITLE),
-				client.getVarcStrValue(VarClientID.NOTIFICATION_MAIN)));
-		}
 		if (event.getScriptId() != ADD_CHATBOX_MESSAGE_SCRIPT)
 		{
 			return;
@@ -831,17 +800,38 @@ public class ClanMessagesPlugin extends Plugin
 		return visibleIndex == visiblePrefix.length() ? originalIndex : -1;
 	}
 
-	@Subscribe
+	@Subscribe(priority = 1)
 	public void onServerNpcLoot(ServerNpcLoot event)
 	{
 		String source = Text.removeTags(event.getComposition().getName());
+		if (!usesServerNpcLoot(event.getComposition().getId(), source)) return;
 		detectLoot(source, event.getItems(), "NPC", event.getComposition().getId(), null);
 	}
 
-	@Subscribe
+	static Map.Entry<String, Integer> exceptionalGameMessageLoot(String message)
+	{
+		if ("You have found a Pharaoh's sceptre! It fell on the floor.".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Pyramid Plunder", ItemID.PHARAOHS_SCEPTRE);
+		if ("You catch a giant blue krill!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_GIANT_KRILL);
+		if ("You catch a golden haddock!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_HADDOCK);
+		if ("You catch a orangefin!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_YELLOWFIN);
+		if ("You catch a huge halibut!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_HALIBUT);
+		if ("You catch a purplefin!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_BLUEFIN);
+		if ("You catch a swift marlin!".equals(message))
+			return new java.util.AbstractMap.SimpleImmutableEntry<>("Deep sea trawling", ItemID.POH_TROPHYDROP_MARLIN);
+		return null;
+	}
+
+	@Subscribe(priority = 1)
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
 		if (event.getNpc() == null) return;
+		if (!usesNpcLootReceived(event.getNpc().getId(), event.getNpc().getName())) return;
 		detectLoot(event.getNpc().getName(), event.getItems(), LootRecordType.NPC.name(),
 			event.getNpc().getId(), null);
 	}
@@ -849,9 +839,15 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onLootReceived(LootReceived event)
 	{
-		if (event.getType() != LootRecordType.PLAYER
-			&& (event.getType() != LootRecordType.NPC || isSpecialLootNpc(event.getName())))
+		if (usesLootReceived(event.getType(), event.getName()))
 		{
+			if (event.getType() == LootRecordType.EVENT && event.getName() != null
+				&& event.getName().toLowerCase(java.util.Locale.ROOT).startsWith("clue scroll"))
+			{
+				log.debug("Official clue loot event: source={}, items={}, tick={}",
+					event.getName(), event.getItems().size(), client.getTickCount());
+				clueRewardGate.rememberOfficial(event.getItems(), client.getTickCount());
+			}
 			String category = event.getType() == LootRecordType.NPC
 				&& ("Crystalline Hunllef".equals(event.getName()) || "Corrupted Hunllef".equals(event.getName()))
 				? LootRecordType.EVENT.name() : event.getType().name();
@@ -862,27 +858,9 @@ public class ClanMessagesPlugin extends Plugin
 	private void detectLoot(String source, Collection<ItemStack> items, String category,
 		Integer npcId, Long singleItemValueOverride)
 	{
-		detectLoot(source, items, category, npcId, singleItemValueOverride, false);
-	}
-
-	private void detectLoot(String source, Collection<ItemStack> items, String category,
-		Integer npcId, Long singleItemValueOverride, boolean chatFallback)
-	{
 		if (!dropParticipationEnabled()) return;
 		List<ItemStack> grouped = groupDropStacks(items);
-		List<ItemStack> immediate = new ArrayList<>();
-		for (ItemStack item : grouped)
-		{
-			String itemName = itemManager.getItemComposition(item.getId()).getName();
-			long value = effectiveDropValue(item, grouped.size(), singleItemValueOverride);
-			if (shouldDeferZeroValueDrop(itemName, value, singleItemValueOverride))
-			{
-				// Retain the exact id for the subsequent official chat fallback.
-				recentLootItemIds.put(normalizeDropFilterValue(itemName), item.getId());
-				continue;
-			}
-			immediate.add(item);
-		}
+		List<ItemStack> immediate = new ArrayList<>(grouped);
 		if (grouped.isEmpty()) return;
 		String eventSource = standardizeKnownLootSource(normalizeDropSource(source));
 		RaidLootContext.Completion completion = raidLootContext.take(eventSource, category, client.getTickCount());
@@ -893,8 +871,7 @@ public class ClanMessagesPlugin extends Plugin
 			log.debug("Raid loot received: eventSource={}, resolvedSource={}, kc={}, minimumValue={}",
 					eventSource, normalizedSource, killCount, Math.max(0, config.discordDropMinimumValue()));
 		}
-		boolean sendImmediate = !immediate.isEmpty()
-			&& (chatFallback || claimDetectedDrop(immediate));
+		boolean sendImmediate = !immediate.isEmpty();
 		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
 		captureDetectedDrop(image -> {
 			long deliveryGeneration = connectionSessionGeneration.get();
@@ -912,7 +889,7 @@ public class ClanMessagesPlugin extends Plugin
 				}
 				if (sendImmediate)
 					notifyDiscordDrop(deliverySource, immediate, category, npcId, singleItemValueOverride,
-						image, chatFallback, deliveryCount);
+						image, deliveryCount);
 				notifyBingoDrops(deliverySource, grouped, category, image);
 			};
 			// RuneLite can publish the generic raid loot event before its mode-specific
@@ -929,12 +906,6 @@ public class ClanMessagesPlugin extends Plugin
 				delivery.run();
 			}
 		});
-	}
-
-	static boolean shouldDeferZeroValueDrop(String itemName, long value, Long valueOverride)
-	{
-		return valueOverride == null && value <= 0
-			&& matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
 	}
 
 	private void rememberLootCount(String message)
@@ -977,6 +948,23 @@ public class ClanMessagesPlugin extends Plugin
 			|| "Crystalline Hunllef".equals(name) || "Corrupted Hunllef".equals(name);
 	}
 
+	static boolean usesServerNpcLoot(int npcId, String name)
+	{
+		return SERVER_LOOT_NPC_IDS.contains(npcId)
+			|| (name != null && name.startsWith("Hallowed Sepulchre"));
+	}
+
+	static boolean usesNpcLootReceived(int npcId, String name)
+	{
+		return !usesServerNpcLoot(npcId, name) && !isSpecialLootNpc(name);
+	}
+
+	static boolean usesLootReceived(LootRecordType type, String name)
+	{
+		return type == LootRecordType.EVENT || type == LootRecordType.PICKPOCKET
+			|| (type == LootRecordType.NPC && isSpecialLootNpc(name));
+	}
+
 	private void captureDetectedDrop(java.util.function.Consumer<java.awt.Image> delivery)
 	{
 		long generation = connectionSessionGeneration.get();
@@ -1015,18 +1003,6 @@ public class ClanMessagesPlugin extends Plugin
 		List<ItemStack> grouped = new ArrayList<>();
 		quantities.forEach((id, quantity) -> grouped.add(new ItemStack(id, quantity)));
 		return grouped;
-	}
-
-	private boolean claimDetectedDrop(Collection<ItemStack> items)
-	{
-		List<String> parts = new ArrayList<>();
-		for (ItemStack item : items)
-		{
-			String name = itemManager.getItemComposition(item.getId()).getName();
-			parts.add(normalizeDropFilterValue(name) + "x" + item.getQuantity());
-		}
-		return claimDropFingerprint(recentDetectedDrops, normalizeDropFilterValue(authenticatedPlayerName),
-			parts, false, client.getTickCount());
 	}
 
 	static boolean claimDropFingerprint(Map<String, Integer> cache, String account,
@@ -1070,9 +1046,9 @@ public class ClanMessagesPlugin extends Plugin
 			String itemName = composition == null ? null : composition.getName();
 			if (itemName == null || manualBingo == null || !manualBingo.acceptsDrop(account, itemName)) continue;
 			if (!claimBingoDrop(itemName, item.getQuantity())) continue;
-			long value = (long) Math.max(0, itemManager.getItemPrice(item.getId())) * item.getQuantity();
+			long value = DropItemPricing.unitPrice(itemManager, item.getId()) * item.getQuantity();
 			sendDetectedDiscordDrop(new BingoDrop(itemName, item.getQuantity(), value, item.getId(), source, category),
-				screenshot, UUID.randomUUID().toString(), true);
+				screenshot, UUID.randomUUID().toString());
 		}
 	}
 
@@ -1081,71 +1057,6 @@ public class ClanMessagesPlugin extends Plugin
 		return claimDropFingerprint(recentBingoDrops, normalizeDropFilterValue(authenticatedPlayerName),
 			java.util.Collections.singletonList(normalizeDropFilterValue(itemName) + "x" + quantity),
 			false, client.getTickCount());
-	}
-
-	private BingoDrop ownClanDrop(String message)
-	{
-		if (message == null || !dropParticipationEnabled()) return null;
-		Matcher matcher = CLAN_DROP_PATTERN.matcher(message);
-		if (!matcher.matches()) return null;
-		String authenticated = WomMembership.normalizePlayerName(authenticatedPlayerName);
-		String local = client.getLocalPlayer() == null ? ""
-			: WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
-		String announced = WomMembership.normalizePlayerName(matcher.group("player"));
-		if (authenticated.isEmpty() || !authenticated.equals(local) || !authenticated.equals(announced)) return null;
-		String itemName = matcher.group("item").trim();
-		try
-		{
-			int quantity = matcher.group("quantity") == null ? 1
-				: Integer.parseInt(matcher.group("quantity").replace(",", ""));
-			Long value = matcher.group("value") == null ? null
-				: Long.parseLong(matcher.group("value").replace(",", ""));
-			boolean bingoAccepted = manualBingo != null
-				&& manualBingo.acceptsDrop(authenticatedPlayerName, itemName);
-			boolean generalAccepted = config.discordDropsEnabled()
-				&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)
-					|| (value != null && value >= Math.max(0, config.discordDropMinimumValue())));
-			boolean statsAccepted = config.statsEnabled() && value != null && value >= 1_000_000L;
-			if (!bingoAccepted && !generalAccepted && !statsAccepted) return null;
-			Integer itemId = null;
-			ItemStack resolved = resolveCollectionLogItem(itemName);
-			if (resolved != null) itemId = resolved.getId();
-			String announcedSource = matcher.group("source");
-			String source = announcedSource == null || announcedSource.trim().isEmpty()
-				? "Clan Chat - " + matcher.group("kind") : announcedSource.trim();
-			return new BingoDrop(itemName, quantity, value, itemId, source, "CLAN_CHAT");
-		}
-		catch (NumberFormatException ignored)
-		{
-			return null;
-		}
-	}
-
-	private void scheduleBingoDrop(BingoDrop drop)
-	{
-		scheduleDropFallback(() -> {
-			captureDetectedDrop(image -> {
-				if (drop.itemId != null)
-				{
-					notifyDiscordDrop(drop.source,
-						java.util.Collections.singletonList(new ItemStack(drop.itemId, drop.quantity)),
-						drop.category, null, drop.totalValue, image, true, readDropKillCount(drop.category, drop.source));
-				}
-				else if (config.discordDropsEnabled()
-					&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, drop.itemName)
-						|| (drop.totalValue != null && drop.totalValue
-							>= Math.max(0, config.discordDropMinimumValue()))))
-				{
-					sendDetectedDiscordDrop(drop, image, UUID.randomUUID().toString(), false);
-				}
-				if (drop.itemId == null) submitDetectedDropStats(drop);
-				if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, drop.itemName)
-					&& claimBingoDrop(drop.itemName, drop.quantity))
-				{
-					sendDetectedDiscordDrop(drop, image, UUID.randomUUID().toString(), true);
-				}
-			});
-		});
 	}
 
 	private boolean bingoDropParticipationEnabled()
@@ -1173,7 +1084,7 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category,
-		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, boolean chatFallback, Integer dropKillCount)
+		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, Integer dropKillCount)
 	{
 		if (items.isEmpty() || isTemporaryLootWorld()) return;
 		long totalValue = 0;
@@ -1181,19 +1092,10 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			long value = effectiveDropValue(item, items.size(), singleItemValueOverride);
 			totalValue += value;
-			net.runelite.api.ItemComposition composition = itemManager.getItemComposition(item.getId());
-			String itemName = composition.getName();
-			String itemKey = normalizeDropFilterValue(itemName);
-			boolean specialValueItem = !composition.isTradeable()
-				|| matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
-			if (specialValueItem)
-			{
-				recentLootItemIds.put(itemKey, item.getId());
-			}
 		}
-		if (config.statsEnabled() && totalValue >= 1_000_000L)
+		if (config.statsEnabled() && totalValue >= MVP_DROP_MINIMUM_VALUE)
 		{
-			submitDropStats(items, source, singleItemValueOverride, chatFallback);
+			submitDropStats(items, source, singleItemValueOverride);
 		}
 		if (matchesDiscordFilter(DISCORD_SOURCE_DENYLIST, source))
 		{
@@ -1203,30 +1105,32 @@ public class ClanMessagesPlugin extends Plugin
 		long minimumValue = Math.max(0, config.discordDropMinimumValue());
 		if (!config.discordDropsEnabled())
 		{
+			log.debug("Discord drop not requested: sending option disabled; source={}", source);
 			return;
 		}
+		boolean clueTotalEligible = source != null && source.startsWith("Clue Scroll (")
+			&& totalValue >= minimumValue;
 		List<String> notableItems = new ArrayList<>();
 		List<Map<String, Object>> dinkItems = new ArrayList<>();
 		long notifiedValue = 0L;
 		Double rarestProbability = null;
 		int thumbnailItemId = -1;
+		long thumbnailItemValue = Long.MIN_VALUE;
 		for (ItemStack item : items)
 		{
 			long value = effectiveDropValue(item, items.size(), singleItemValueOverride);
 			String itemName = itemManager.getItemComposition(item.getId()).getName();
 			boolean denied = matchesDiscordFilter(DISCORD_ITEM_DENYLIST, itemName);
 			boolean allowed = matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName);
-			// An untradeable allowlisted item may have a zero GE price. Its game
-			// message supplies the real value shortly afterwards, so defer it to
-			// that path instead of sending a zero-value Discord duplicate.
-			if (denied || value <= 0 || (value < minimumValue && !allowed))
+			// Explicitly allowlisted untradeables can legitimately have no GE price.
+			if (!shouldNotifyDiscordItem(denied, allowed, value, minimumValue, clueTotalEligible))
 			{
 				continue;
 			}
-			if (!admitDropNotification("discord", itemName, item.getQuantity(), chatFallback)) continue;
-			if (thumbnailItemId < 0)
+			if (thumbnailItemId < 0 || value > thumbnailItemValue)
 			{
 				thumbnailItemId = item.getId();
+				thumbnailItemValue = value;
 			}
 			notifiedValue += value;
 			java.util.OptionalDouble itemRarity = dropRarityService.getRarity(source, item.getId(), item.getQuantity());
@@ -1242,10 +1146,10 @@ public class ClanMessagesPlugin extends Plugin
 			dinkItem.put("quantity", item.getQuantity());
 			dinkItem.put("priceEach", singleItemValueOverride != null && items.size() == 1
 				? Math.max(0L, singleItemValueOverride) / Math.max(1, item.getQuantity())
-				: itemManager.getItemPrice(item.getId()));
+				: DropItemPricing.unitPrice(itemManager, item.getId()));
 			dinkItem.put("name", itemName);
 			List<String> criteria = new ArrayList<>();
-			if (value >= minimumValue) criteria.add("VALUE");
+			if (value >= minimumValue || clueTotalEligible) criteria.add("VALUE");
 			if (allowed) criteria.add("ALLOWLIST");
 			dinkItem.put("criteria", criteria);
 			dinkItem.put("rarity", rarity);
@@ -1253,6 +1157,8 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		if (notableItems.isEmpty())
 		{
+			log.debug("Discord drop filtered before request: source={}, totalValue={}, minimumValue={}, itemCount={}",
+				source, totalValue, minimumValue, items.size());
 			return;
 		}
 		String playerName = client.getLocalPlayer() == null ? "Jogador" : client.getLocalPlayer().getName();
@@ -1265,13 +1171,24 @@ public class ClanMessagesPlugin extends Plugin
 			dinkItems, dropTotalValue, dropKillCount, dropRarestProbability, screenshot);
 	}
 
+	static boolean shouldNotifyDiscordItem(boolean denied, boolean allowed, long value, long minimumValue)
+	{
+		return shouldNotifyDiscordItem(denied, allowed, value, minimumValue, false);
+	}
+
+	static boolean shouldNotifyDiscordItem(boolean denied, boolean allowed, long value, long minimumValue,
+		boolean clueTotalEligible)
+	{
+		return !denied && (allowed || clueTotalEligible || (value > 0 && value >= Math.max(0, minimumValue)));
+	}
+
 	private long effectiveDropValue(ItemStack item, int itemCount, Long singleItemValueOverride)
 	{
 		if (singleItemValueOverride != null && itemCount == 1)
 		{
 			return Math.max(0L, singleItemValueOverride);
 		}
-		return (long) itemManager.getItemPrice(item.getId()) * item.getQuantity();
+		return DropItemPricing.unitPrice(itemManager, item.getId()) * item.getQuantity();
 	}
 
 	static boolean matchesDiscordFilter(List<String> filters, String value)
@@ -1292,51 +1209,6 @@ public class ClanMessagesPlugin extends Plugin
 			}
 		}
 		return false;
-	}
-
-	static String allowlistedCollectionItem(String message)
-	{
-		String itemName = collectionItem(message);
-		return matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName) ? itemName : null;
-	}
-
-	private static String collectionItem(String message)
-	{
-		if (message == null) return null;
-		Matcher matcher = PET_COLLECTION_PATTERN.matcher(message.replace('\u00A0', ' ').trim());
-		return matcher.find() ? matcher.group(1).trim().replaceFirst("\\.$", "") : null;
-	}
-
-	static String collectionPopupItem(String title, String message)
-	{
-		if (title == null || !"Collection log".equalsIgnoreCase(Text.removeTags(title).trim())
-			|| message == null) return null;
-		String plain = Text.removeTags(message).replace('\u00A0', ' ').trim();
-		String prefix = "New item:";
-		return plain.regionMatches(true, 0, prefix, 0, prefix.length())
-			? plain.substring(prefix.length()).trim() : null;
-	}
-
-	private void queueCollectionFallbackIfEligible(String itemName)
-	{
-		if (itemName == null || itemName.trim().isEmpty()) return;
-		boolean accepted = matchesDiscordFilter(DROP_ITEM_ALLOWLIST, itemName)
-			|| (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, itemName));
-		if (!accepted)
-		{
-			ItemStack resolved = resolveCollectionLogItem(itemName);
-			if (resolved != null)
-			{
-				long value = Math.max(0, itemManager.getItemPrice(resolved.getId()));
-				accepted = (config.statsEnabled() && value >= 1_000_000L)
-					|| (config.discordDropsEnabled()
-						&& value >= Math.max(0, config.discordDropMinimumValue()));
-			}
-		}
-		if (accepted)
-		{
-			scheduleAllowlistedDropFallback(new PendingAllowlistedDrop(itemName, 1, null));
-		}
 	}
 
 	static java.util.Map.Entry<String, Integer> parseClueCompletion(String message)
@@ -1366,7 +1238,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void captureClueReward()
 	{
-		if (pendingClueTier.isEmpty()) return;
+		if (!pendingClueReward) return;
 		Widget itemsWidget = client.getWidget(InterfaceID.TrailRewardscreen.ITEMS);
 		Widget[] children = itemsWidget == null ? null : itemsWidget.getChildren();
 		if (children == null) return;
@@ -1379,8 +1251,9 @@ public class ClanMessagesPlugin extends Plugin
 			}
 		}
 		if (items.isEmpty()) return;
-		String tier = pendingClueTier.substring(0, 1).toUpperCase(java.util.Locale.ROOT)
-			+ pendingClueTier.substring(1).toLowerCase(java.util.Locale.ROOT);
+		String tier = pendingClueTier.isEmpty() ? "Unknown"
+			: pendingClueTier.substring(0, 1).toUpperCase(java.util.Locale.ROOT)
+				+ pendingClueTier.substring(1).toLowerCase(java.util.Locale.ROOT);
 		String source = "Clue Scroll (" + tier + ")";
 		if (pendingClueCount > 0)
 		{
@@ -1389,7 +1262,37 @@ public class ClanMessagesPlugin extends Plugin
 			lastLootCountTick = client.getTickCount();
 		}
 		resetPendingClue();
-		detectLoot(source, items, LootRecordType.EVENT.name(), null, null);
+		int rewardTick = client.getTickCount();
+		log.debug("Clue reward widget: source={}, items={}, tick={}", source, items.size(), rewardTick);
+		if (!clueRewardGate.shouldSendWidget(items, rewardTick))
+		{
+			log.debug("Clue widget matches official loot event; using official event");
+			return;
+		}
+		ScheduledExecutorService currentExecutor = executor;
+		if (currentExecutor == null || currentExecutor.isShutdown())
+		{
+			detectLoot(source, items, LootRecordType.EVENT.name(), null, null);
+			return;
+		}
+		try
+		{
+			currentExecutor.schedule(() -> clientThread.invokeLater(() -> {
+				if (clueRewardGate.shouldSendWidget(items, rewardTick))
+				{
+					log.debug("No matching official clue loot event; using reward widget");
+					detectLoot(source, items, LootRecordType.EVENT.name(), null, null);
+				}
+				else
+				{
+					log.debug("Clue widget matches official loot event; using official event");
+				}
+			}), CLUE_WIDGET_FALLBACK_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+		}
+		catch (java.util.concurrent.RejectedExecutionException ignored)
+		{
+			detectLoot(source, items, LootRecordType.EVENT.name(), null, null);
+		}
 	}
 
 	private void resetPendingClue()
@@ -1397,106 +1300,12 @@ public class ClanMessagesPlugin extends Plugin
 		pendingClueTier = "";
 		pendingClueCount = -1;
 		pendingClueTicks = 0;
-	}
-
-	static PendingAllowlistedDrop allowlistedValuableDrop(String message)
-	{
-		PendingAllowlistedDrop drop = parsedValuableDrop(message);
-		boolean untradeable = message != null && message.trim().toLowerCase(java.util.Locale.ROOT)
-			.startsWith("untradeable drop:");
-		return drop != null && (untradeable || matchesDiscordFilter(DROP_ITEM_ALLOWLIST, drop.itemName)) ? drop : null;
-	}
-
-	private static PendingAllowlistedDrop parsedValuableDrop(String message)
-	{
-		if (message == null) return null;
-		Matcher matcher = VALUABLE_DROP_PATTERN.matcher(message.replace('\u00A0', ' ').trim());
-		if (!matcher.find()) return null;
-		String itemName = matcher.group(3).trim();
-		try
-		{
-			int quantity = matcher.group(2) == null ? 1 : Integer.parseInt(matcher.group(2));
-			long totalValue = Long.parseLong(matcher.group(4).replace(",", ""));
-			return new PendingAllowlistedDrop(itemName, quantity, totalValue);
-		}
-		catch (NumberFormatException ignored)
-		{
-			return null;
-		}
+		pendingClueReward = false;
 	}
 
 	private static String normalizeDropFilterValue(String value)
 	{
 		return value == null ? "" : value.replace('\u00A0', ' ').trim().toLowerCase(java.util.Locale.ROOT);
-	}
-
-	private void scheduleAllowlistedDropFallback(PendingAllowlistedDrop drop)
-	{
-		if ((!config.discordDropsEnabled() && !config.statsEnabled()) || isTemporaryLootWorld()) return;
-		scheduleDropFallback(() -> deliverAllowlistedDropFallback(drop));
-	}
-
-	private void scheduleDropFallback(Runnable action)
-	{
-		long generation = connectionSessionGeneration.get();
-		String account = authenticatedPlayerName;
-		dropFallbackQueue.add(client.getTickCount(), () -> {
-			if (isCurrentConnectionSession(generation, account) && dropParticipationEnabled()) action.run();
-		});
-	}
-
-	private boolean admitDropNotification(String destination, String itemName, long quantity, boolean fallback)
-	{
-		return dropNotificationHistory.admit(authenticatedPlayerName, destination, itemName, quantity,
-			client.getTickCount(), fallback);
-	}
-
-	private void deliverAllowlistedDropFallback(PendingAllowlistedDrop drop)
-	{
-		ItemStack resolved = resolveCollectionLogItem(drop.itemName);
-		if (resolved == null)
-		{
-			BingoDrop fallback = new BingoDrop(drop.itemName, drop.quantity, drop.totalValue,
-				null, drop.totalValue == null ? "Collection Log" : "Valuable drop", "COLLECTION_LOG");
-			captureDetectedDrop(image -> {
-				submitDetectedDropStats(fallback);
-				if (config.discordDropsEnabled()
-					&& (matchesDiscordFilter(DROP_ITEM_ALLOWLIST, fallback.itemName)
-						|| (fallback.totalValue != null && fallback.totalValue
-							>= Math.max(0, config.discordDropMinimumValue()))))
-				{
-					sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), false);
-				}
-				if (manualBingo != null && manualBingo.acceptsDrop(authenticatedPlayerName, fallback.itemName)
-					&& claimBingoDrop(fallback.itemName, fallback.quantity))
-				{
-					sendDetectedDiscordDrop(fallback, image, UUID.randomUUID().toString(), true);
-				}
-			});
-			return;
-		}
-		ItemStack item = new ItemStack(resolved.getId(), drop.quantity);
-		String source = drop.totalValue == null ? "Collection Log" : "Valuable drop";
-		log.debug("Using chat fallback for allowlisted item: {}", drop.itemName);
-		detectLoot(source, java.util.Collections.singletonList(item),
-			"COLLECTION_LOG", null, drop.totalValue, true);
-	}
-
-	private ItemStack resolveCollectionLogItem(String itemName)
-	{
-		Integer recentItemId = recentLootItemIds.get(normalizeDropFilterValue(itemName));
-		if (recentItemId != null)
-		{
-			return new ItemStack(recentItemId, 1);
-		}
-		for (net.runelite.http.api.item.ItemPrice candidate : itemManager.search(itemName))
-		{
-			if (candidate.getName() != null && candidate.getName().trim().equalsIgnoreCase(itemName))
-			{
-				return new ItemStack(candidate.getId(), 1);
-			}
-		}
-		return null;
 	}
 
 	private static String discordWikiLink(String label, String search)
@@ -1662,6 +1471,8 @@ public class ClanMessagesPlugin extends Plugin
 		int groupId = event.getGroupId();
 		if (groupId == InterfaceID.TRAIL_REWARDSCREEN)
 		{
+			pendingClueReward = true;
+			pendingClueTicks = 0;
 			captureClueReward();
 		}
 		// Physical scoreboards do not share one stable interface group. Restrict
@@ -2579,7 +2390,7 @@ public class ClanMessagesPlugin extends Plugin
 		return "Quest points pendentes";
 	}
 
-	private void submitDropStats(Collection<ItemStack> items, String source, Long singleItemValueOverride, boolean chatFallback)
+	private void submitDropStats(Collection<ItemStack> items, String source, Long singleItemValueOverride)
 	{
 		if (client.getLocalPlayer() == null) return;
 		Map<Integer, Long> quantitiesByItem = new LinkedHashMap<>();
@@ -2594,10 +2405,8 @@ public class ClanMessagesPlugin extends Plugin
 			long quantity = item.getValue();
 			long value = singleItemValueOverride != null && quantitiesByItem.size() == 1
 				? Math.max(0L, singleItemValueOverride)
-				: (long) itemManager.getItemPrice(item.getKey()) * quantity;
-			if (value < 1_000_000L) continue;
-			if (!admitDropNotification("stats", itemManager.getItemComposition(item.getKey()).getName(),
-				quantity, chatFallback)) continue;
+				: DropItemPricing.unitPrice(itemManager, item.getKey()) * quantity;
+			if (value < MVP_DROP_MINIMUM_VALUE) continue;
 			Map<String, Object> validDrop = new LinkedHashMap<>();
 			validDrop.put("item", quantity + "x " + itemManager.getItemComposition(item.getKey()).getName());
 			validDrop.put("value", value);
@@ -2655,15 +2464,13 @@ public class ClanMessagesPlugin extends Plugin
 		}, delaySeconds, TimeUnit.SECONDS);
 	}
 
-	private void sendDetectedDiscordDrop(BingoDrop drop, java.awt.Image screenshot, String idempotencyKey,
-		boolean bingo)
+	private void sendDetectedDiscordDrop(BingoDrop drop, java.awt.Image screenshot, String idempotencyKey)
 	{
-		if (!bingo && !admitDropNotification("discord", drop.itemName, drop.quantity, true)) return;
 		String playerName = authenticatedPlayerName;
 		long totalValue = drop.totalValue == null ? 0L : Math.max(0L, drop.totalValue);
 		String valueText = drop.totalValue == null ? "valor desconhecido" : formatDropValue(totalValue);
 		Map<String, Object> embed = new LinkedHashMap<>();
-		embed.put("title", bingo ? "Bingo Drop" : "Loot Drop");
+		embed.put("title", "Bingo Drop");
 		embed.put("description", discordWikiLink(drop.quantity + "x " + drop.itemName, drop.itemName)
 			+ " (" + valueText + ")\n" + discordWikiLink(drop.source, drop.source));
 		embed.put("color", dropEmbedColor(totalValue));
@@ -2684,7 +2491,7 @@ public class ClanMessagesPlugin extends Plugin
 		item.put("name", drop.itemName);
 		item.put("quantity", drop.quantity);
 		item.put("priceEach", drop.totalValue == null ? null : totalValue / Math.max(1, drop.quantity));
-		item.put("criteria", java.util.Collections.singletonList(bingo ? "BINGO_ALLOWLIST" : "ALLOWLIST"));
+		item.put("criteria", java.util.Collections.singletonList("BINGO_ALLOWLIST"));
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("items", java.util.Collections.singletonList(item));
 		extra.put("source", drop.source);
@@ -2701,24 +2508,9 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("world", client.getWorld());
 		payload.put("extra", extra);
 
-		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""), bingo);
+		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""), true);
 		deliverDiscordNotification(requestTemplate, payload, embed, screenshot,
-			DISCORD_LOOT_ATTACHMENT, bingo ? "Bingo drop notification" : "Discord drop notification");
-	}
-
-	private void submitDetectedDropStats(BingoDrop drop)
-	{
-		if (!config.statsEnabled() || drop.totalValue == null || drop.totalValue < 1_000_000L) return;
-		if (!admitDropNotification("stats", drop.itemName, drop.quantity, true)) return;
-		Map<String, Object> validDrop = new LinkedHashMap<>();
-		validDrop.put("item", drop.quantity + "x " + drop.itemName);
-		validDrop.put("value", drop.totalValue);
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("playerName", authenticatedPlayerName);
-		payload.put("eventId", UUID.randomUUID().toString());
-		payload.put("drops", java.util.Collections.singletonList(validDrop));
-		payload.put("source", normalizeDropSource(drop.source));
-		submitDropPayload(gson.toJson(payload), 0);
+			DISCORD_LOOT_ATTACHMENT, "Bingo drop notification");
 	}
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
@@ -2781,7 +2573,11 @@ public class ClanMessagesPlugin extends Plugin
 	private void deliverDiscordNotification(Request requestTemplate, Map<String, Object> payload,
 		Map<String, Object> embed, java.awt.Image screenshot, String attachmentName, String destination)
 	{
-		if (requestTemplate == null || executor == null || executor.isShutdown()) return;
+		if (requestTemplate == null || executor == null || executor.isShutdown())
+		{
+			log.debug("{} could not start: request or delivery executor unavailable", destination);
+			return;
+		}
 		long generation = connectionSessionGeneration.get();
 		String account = authenticatedPlayerName;
 		executor.execute(() -> {
@@ -2802,12 +2598,17 @@ public class ClanMessagesPlugin extends Plugin
 			DropDeliveryClient delivery = dropDeliveryClient;
 			if (delivery != null)
 			{
+				log.debug("{} prepared for server request", destination);
 				delivery.send(
 					requestTemplate.newBuilder().post(bodies.initialBody).build(),
 					requestTemplate.newBuilder().post(bodies.retryBody).build(),
 					destination,
 					() -> isCurrentConnectionSession(generation, account)
 						&& config.discordDropsEnabled() && dropParticipationEnabled());
+			}
+			else
+			{
+				log.debug("{} could not start: delivery client unavailable", destination);
 			}
 		});
 	}
@@ -3138,11 +2939,10 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
-		dropFallbackQueue.advance(client.getTickCount());
-		if (!pendingClueTier.isEmpty())
+		if (pendingClueReward || !pendingClueTier.isEmpty())
 		{
 			captureClueReward();
-			if (!pendingClueTier.isEmpty() && ++pendingClueTicks > 1)
+			if ((pendingClueReward || !pendingClueTier.isEmpty()) && ++pendingClueTicks > 1)
 			{
 				resetPendingClue();
 			}
@@ -3644,7 +3444,6 @@ public class ClanMessagesPlugin extends Plugin
 	private void clearPendingCaptures()
 	{
 		resetPendingClue();
-		collectionPopupStarted = false;
 		adventureLogOwner = null;
 		adventureLogMenuLoaded = false;
 		adventureLogCountersLoaded = false;
@@ -5210,6 +5009,7 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
+			clueRewardGate.clear();
 			dropScreenshotEncoder.clear();
 			configurePolling();
 			connectionSessionGeneration.incrementAndGet();
@@ -5217,10 +5017,6 @@ public class ClanMessagesPlugin extends Plugin
 			messageSessionGeneration.incrementAndGet();
 			rankRequestsSessionInitialized = false;
 			deliveredPinnedMessageIds.clear();
-			dropNotificationHistory.clear();
-			dropFallbackQueue.clear();
-			recentLootItemIds.clear();
-			recentDetectedDrops.clear();
 			recentBingoDrops.clear();
 			lastLootCountSource = "";
 			lastLootCount = -1;

@@ -51,4 +51,26 @@ public class RaidLootContextTest
 		assertFalse(RaidLootContext.isGenericRaid("Tombs of Amascut: Expert Mode"));
 		assertFalse(RaidLootContext.isGenericRaid("Vorkath"));
 	}
+
+	@Test
+	public void simulatesBothMessageOrdersWithoutSuppressingRaidLoot()
+	{
+		String[][] cases = {
+			{"Chambers of Xeric", "Chambers of Xeric: Challenge Mode"},
+			{"Theatre of Blood", "Theatre of Blood: Hard Mode"},
+			{"Tombs of Amascut", "Tombs of Amascut: Expert Mode"}
+		};
+		for (String[] raid : cases)
+		{
+			RaidLootContext before = new RaidLootContext();
+			before.remember(raid[1], 42, 100);
+			assertEquals(raid[1], before.take(raid[0], "EVENT", 101).source);
+			assertNull(before.take(raid[0], "EVENT", 101));
+
+			RaidLootContext after = new RaidLootContext();
+			assertNull(after.take(raid[0], "EVENT", 100));
+			after.remember(raid[1], 42, 101);
+			assertEquals(raid[1], after.take(raid[0], "EVENT", 101).source);
+		}
+	}
 }

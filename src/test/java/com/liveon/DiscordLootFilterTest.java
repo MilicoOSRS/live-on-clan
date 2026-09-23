@@ -1,7 +1,8 @@
 package com.liveon;
 
 import java.util.Arrays;
-import java.util.regex.Matcher;
+import net.runelite.api.gameval.NpcID;
+import net.runelite.http.api.loottracker.LootRecordType;
 import org.junit.Test;
 
 import static org.junit.Assert.assertFalse;
@@ -43,21 +44,64 @@ public class DiscordLootFilterTest
 	}
 
 	@Test
-	public void zeroValueAllowlistedItemsWaitForChatValue()
+	public void routesNpcEventsWithoutDependingOnChatFallbacks()
 	{
-		assertTrue(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, null));
-		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, 12_000_000L));
-		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 12_000_000L, null));
-		assertFalse(ClanMessagesPlugin.shouldDeferZeroValueDrop("Rune platebody", 0, null));
+		assertTrue(ClanMessagesPlugin.usesServerNpcLoot(NpcID.YAMA, "Yama"));
+		assertFalse(ClanMessagesPlugin.usesNpcLootReceived(NpcID.YAMA, "Yama"));
+		assertFalse(ClanMessagesPlugin.usesServerNpcLoot(1, "Goblin"));
+		assertTrue(ClanMessagesPlugin.usesNpcLootReceived(1, "Goblin"));
+		assertTrue(ClanMessagesPlugin.usesServerNpcLoot(1, "Hallowed Sepulchre Grand Coffin"));
+		assertFalse(ClanMessagesPlugin.usesNpcLootReceived(1, "Hallowed Sepulchre Grand Coffin"));
+		assertFalse(ClanMessagesPlugin.usesNpcLootReceived(1, "Araxxor"));
+		assertTrue(ClanMessagesPlugin.usesLootReceived(LootRecordType.EVENT, "Chambers of Xeric"));
+		assertTrue(ClanMessagesPlugin.usesLootReceived(LootRecordType.PICKPOCKET, "Vyrewatch Sentinel"));
+		assertTrue(ClanMessagesPlugin.usesLootReceived(LootRecordType.NPC, "Araxxor"));
+		assertFalse(ClanMessagesPlugin.usesLootReceived(LootRecordType.NPC, "Goblin"));
+		assertFalse(ClanMessagesPlugin.usesLootReceived(LootRecordType.PLAYER, "Player"));
 	}
 
 	@Test
-	public void bingoDeliveryDoesNotConsumeNormalFallbackAndSuppressesRepeat()
+	public void letsExplicitAllowlistBypassMissingPriceButNeverDenylist()
+	{
+		assertTrue(ClanMessagesPlugin.shouldNotifyDiscordItem(false, true, 0, 1_000_000));
+		assertFalse(ClanMessagesPlugin.shouldNotifyDiscordItem(true, true, 0, 1_000_000));
+		assertFalse(ClanMessagesPlugin.shouldNotifyDiscordItem(false, false, 0, 0));
+		assertFalse(ClanMessagesPlugin.shouldNotifyDiscordItem(false, false, 999_999, 1_000_000));
+		assertTrue(ClanMessagesPlugin.shouldNotifyDiscordItem(false, false, 1_000_000, 1_000_000));
+	}
+
+	@Test
+	public void clueTotalCanIncludeSmallerItemsWithoutOverridingDenylist()
+	{
+		assertTrue(ClanMessagesPlugin.shouldNotifyDiscordItem(false, false, 200_000, 1_000_000, true));
+		assertFalse(ClanMessagesPlugin.shouldNotifyDiscordItem(true, false, 200_000, 1_000_000, true));
+		assertFalse(ClanMessagesPlugin.shouldNotifyDiscordItem(false, false, 200_000, 1_000_000, false));
+	}
+
+	@Test
+	public void recognizesOnlyExactExceptionalLootMessages()
+	{
+		assertEquals("Pyramid Plunder", ClanMessagesPlugin.exceptionalGameMessageLoot(
+			"You have found a Pharaoh's sceptre! It fell on the floor.").getKey());
+		for (String message : new String[] {
+			"You catch a giant blue krill!", "You catch a golden haddock!",
+			"You catch a orangefin!", "You catch a huge halibut!",
+			"You catch a purplefin!", "You catch a swift marlin!"
+		})
+		{
+			assertEquals(message, "Deep sea trawling",
+				ClanMessagesPlugin.exceptionalGameMessageLoot(message).getKey());
+		}
+		assertNull(ClanMessagesPlugin.exceptionalGameMessageLoot(
+			"Akazudo received special loot from a raid: Tumeken's shadow."));
+	}
+
+	@Test
+	public void bingoDeliveryUsesItsOwnDuplicateHistory()
 	{
 		java.util.Map<String, Integer> bingo = new java.util.HashMap<>();
 		java.util.Map<String, Integer> normal = new java.util.HashMap<>();
 		java.util.List<String> item = Arrays.asList("magus vestigex1");
-		assertTrue(ClanMessagesPlugin.shouldDeferZeroValueDrop("Magus vestige", 0, null));
 		assertTrue(ClanMessagesPlugin.claimDropFingerprint(bingo, "player", item, false, 100));
 		assertTrue(ClanMessagesPlugin.claimDropFingerprint(normal, "player", item, true, 102));
 		assertFalse(ClanMessagesPlugin.claimDropFingerprint(bingo, "player", item, false, 102));
@@ -76,94 +120,6 @@ public class DiscordLootFilterTest
 	}
 
 	@Test
-	public void extractsOnlyAllowlistedLocalCollectionLogItems()
-	{
-		assertEquals("Crimson kisten", ClanMessagesPlugin.allowlistedCollectionItem(
-			"New item added to your collection log: Crimson kisten"));
-		assertEquals("Araxyte fang", ClanMessagesPlugin.allowlistedCollectionItem(
-			"Collection log: Araxyte fang."));
-		assertNull(ClanMessagesPlugin.allowlistedCollectionItem(
-			"New item added to your collection log: Rune platebody"));
-	}
-
-	@Test
-	public void extractsAllowlistedValuableDropsWithReliableValue()
-	{
-		ClanMessagesPlugin.PendingAllowlistedDrop drop = ClanMessagesPlugin.allowlistedValuableDrop(
-			"Valuable drop: 2 x Crimson kisten (7,200,000 coins)");
-		assertEquals("Crimson kisten", drop.itemName);
-		assertEquals(2, drop.quantity);
-		assertEquals(Long.valueOf(7_200_000L), drop.totalValue);
-	}
-
-	@Test
-	public void ignoresValuableDropsOutsideAllowlist()
-	{
-		assertNull(ClanMessagesPlugin.allowlistedValuableDrop(
-			"Valuable drop: 1 x Rune platebody (4,000,000 coins)"));
-	}
-
-	@Test
-	public void extractsAnyUntradeableDropWithGameValue()
-	{
-		ClanMessagesPlugin.PendingAllowlistedDrop drop = ClanMessagesPlugin.allowlistedValuableDrop(
-			"Untradeable drop: Araxyte fang (18,400,000 coins)");
-		assertEquals("Araxyte fang", drop.itemName);
-		assertEquals(1, drop.quantity);
-		assertEquals(Long.valueOf(18_400_000L), drop.totalValue);
-
-		ClanMessagesPlugin.PendingAllowlistedDrop generic = ClanMessagesPlugin.allowlistedValuableDrop(
-			"Untradeable drop: Future untradeable reward (2,500,000 coins)");
-		assertEquals("Future untradeable reward", generic.itemName);
-		assertEquals(Long.valueOf(2_500_000L), generic.totalValue);
-	}
-
-	@Test
-	public void recognizesClanClueItemAnnouncements()
-	{
-		Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(
-			"Milico received a clue item: 3rd Age platelegs (73,347,961 coins).");
-		assertTrue(matcher.matches());
-		assertEquals("Milico", matcher.group("player"));
-		assertEquals("received a clue item", matcher.group("kind"));
-		assertEquals("3rd Age platelegs", matcher.group("item"));
-		assertEquals("73,347,961", matcher.group("value"));
-	}
-
-	@Test
-	public void separatesClanDropValueAndSourceSuffix()
-	{
-		Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(
-			"Iron Slyfer received a drop: Araxyte fang (50,000,000 coins) from Araxxor.");
-		assertTrue(matcher.matches());
-		assertEquals("Araxyte fang", matcher.group("item"));
-		assertEquals("50,000,000", matcher.group("value"));
-		assertEquals("Araxxor", matcher.group("source"));
-	}
-
-	@Test
-	public void parsesClanDropFormatMatrixWithoutLosingValues()
-	{
-		String[][] cases = {
-			{"Player received a drop: Virtus robe top (31,486,550 coins) from Vardorvis", "Virtus robe top", "31,486,550", "Vardorvis", null},
-			{"Player received a drop: 2 x Dragon platelegs (3,200,000 coins) from Rune dragon.", "Dragon platelegs", "3,200,000", "Rune dragon", "2"},
-			{"Player received a valuable drop: Zenyte shard (16,791,892 coins).", "Zenyte shard", "16,791,892", null, null},
-			{"Player received special loot from a raid: Dexterous prayer scroll (15,454,422 coins).", "Dexterous prayer scroll", "15,454,422", null, null},
-			{"Player received a clue item: 3rd age platelegs (73,347,961 coins).", "3rd age platelegs", "73,347,961", null, null},
-			{"Player received a new collection log item: Rock golem.", "Rock golem", null, null, null}
-		};
-		for (String[] expected : cases)
-		{
-			Matcher matcher = ClanMessagesPlugin.CLAN_DROP_PATTERN.matcher(expected[0]);
-			assertTrue(expected[0], matcher.matches());
-			assertEquals(expected[1], matcher.group("item"));
-			assertEquals(expected[2], matcher.group("value"));
-			assertEquals(expected[3], matcher.group("source"));
-			assertEquals(expected[4], matcher.group("quantity"));
-		}
-	}
-
-	@Test
 	public void parsesClueCompletionBeforeRewardWidgetLoads()
 	{
 		java.util.Map.Entry<String, Integer> clue = ClanMessagesPlugin.parseClueCompletion(
@@ -172,16 +128,8 @@ public class DiscordLootFilterTest
 		assertEquals(Integer.valueOf(320), clue.getValue());
 		assertNull(ClanMessagesPlugin.parseClueCompletion(
 			"Your treasure is worth around 73,479,532 coins!"));
+		assertNull(ClanMessagesPlugin.parseClueCompletion(
+			"Well done, you've completed the Treasure Trail!"));
 	}
 
-	@Test
-	public void parsesCollectionLogPopupAsASecondDetectionSignal()
-	{
-		assertEquals("3rd age platelegs", ClanMessagesPlugin.collectionPopupItem(
-			"Collection log", "New item: 3rd age platelegs"));
-		assertNull(ClanMessagesPlugin.collectionPopupItem(
-			"Combat Achievement", "New item: 3rd age platelegs"));
-		assertNull(ClanMessagesPlugin.collectionPopupItem(
-			"Collection log", "Something else"));
-	}
 }

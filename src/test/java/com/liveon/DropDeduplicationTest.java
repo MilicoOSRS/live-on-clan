@@ -9,7 +9,7 @@ import static org.junit.Assert.*;
 public class DropDeduplicationTest
 {
 	@Test
-	public void clanAnnouncementDoesNotDuplicateOneItemFromMultiItemLoot()
+	public void bingoCannotTreatAnOfficialLootItemAsItsOwnSecondDrop()
 	{
 		Map<String, Integer> cache = new HashMap<>();
 		assertTrue(ClanMessagesPlugin.claimDropFingerprint(cache, "player",
@@ -21,7 +21,7 @@ public class DropDeduplicationTest
 	}
 
 	@Test
-	public void differentAccountsQuantitiesAndResetTicksRemainIndependent()
+	public void bingoHistorySeparatesAccountsQuantitiesAndResetTicks()
 	{
 		Map<String, Integer> cache = new HashMap<>();
 		assertTrue(ClanMessagesPlugin.claimDropFingerprint(cache, "one", Arrays.asList("fangx1"), false, 100));

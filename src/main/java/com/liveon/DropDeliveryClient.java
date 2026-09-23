@@ -67,6 +67,7 @@ final class DropDeliveryClient implements AutoCloseable
 		BooleanSupplier retryAllowed, int attempt)
 	{
 		if (closed.get()) return;
+		log.debug("Starting {} server request (attempt {})", destination, attempt + 1);
 		Call call = httpClient.newCall(request);
 		calls.add(call);
 		if (closed.get())
@@ -94,7 +95,17 @@ final class DropDeliveryClient implements AutoCloseable
 				calls.remove(completedCall);
 				try (Response ignored = response)
 				{
-					String responseBody = response.body() == null ? "" : response.body().string();
+					String responseBody = "";
+					try
+					{
+						responseBody = response.body() == null ? "" : response.body().string();
+					}
+					catch (IOException exception)
+					{
+						// The status is already known: an unreadable diagnostic body must
+						// not prevent retrying a transient error or removing a rejected image.
+						log.debug("Unable to read {} response body (HTTP {})", destination, response.code(), exception);
+					}
 					if (!response.isSuccessful())
 					{
 						log.debug("{} delivery returned {}: {}", destination, response.code(), responseBody);
@@ -113,7 +124,7 @@ final class DropDeliveryClient implements AutoCloseable
 					}
 					else
 					{
-						log.debug("{} delivered (attempt {}): {}", destination, attempt + 1, responseBody);
+						log.debug("{} server response (attempt {}): {}", destination, attempt + 1, responseBody);
 					}
 				}
 			}
