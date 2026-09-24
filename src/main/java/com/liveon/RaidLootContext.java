@@ -6,7 +6,12 @@ import java.util.Map;
 /** Recent raid completions waiting for their matching chest. */
 final class RaidLootContext
 {
-	static final int MAX_AGE_TICKS = 1000;
+	// Real gaps between the completion-count message and the chest loot event have
+	// measured up to ~26 seconds (ToB, ToA) - the old 10-tick (6s) window was too tight
+	// and left the kill count blank (cosmetic only, but avoidable). 100 ticks (60s) is
+	// still far below the several minutes any full raid takes, so it can't relabel a
+	// later, unrelated raid attempt with a stale CM/HM/Expert completion.
+	static final int MAX_AGE_TICKS = 100;
 	private static final String[] RAIDS = {
 		"Chambers of Xeric", "Theatre of Blood", "Tombs of Amascut"
 	};

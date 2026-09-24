@@ -57,9 +57,59 @@ public class PbPayloadTest
 			"Tombs of Amascut: Expert Mode total completion time: 25:00 (new personal best)");
 		assertEquals("Tombs of Amascut: Expert Mode", toa.get("boss"));
 		assertEquals(1500.0, (Double) toa.get("seconds"), 0.001);
-		// A generic ToB total must not be submitted as the room PB or assumed Normal.
-		assertNull(ClanMessagesPlugin.parseChatNewPb(
-			"Theatre of Blood total completion time: 25:28.80 (new personal best)"));
+		// Theatre of Blood's total-completion line is now its own "Overall" PB category,
+		// distinct from the room/challenge-time PB. It never carries a mode itself - that is
+		// resolved later at submission time from whatever pendingPbMode the wave-complete
+		// message (parsed elsewhere, moments earlier) already captured.
+		Map<String, Object> tob = ClanMessagesPlugin.parseChatNewPb(
+			"Theatre of Blood total completion time: 25:28.80 (new personal best)");
+		assertEquals("Theatre of Blood", tob.get("boss"));
+		assertEquals(1528.8, (Double) tob.get("seconds"), 0.001);
+	}
+
+	@Test
+	public void readsOwnClanPbAnnouncementsAcrossActivitiesAndModes()
+	{
+		Map<String, Object> cox = ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Chambers of Xeric (Team Size: Solo) personal best: 16:46", "Tammz");
+		assertEquals("Chambers of Xeric", cox.get("boss"));
+		assertEquals("Normal", cox.get("mode"));
+		assertEquals(0, cox.get("teamSize"));
+		assertEquals(1006.0, (Double) cox.get("seconds"), 0.001);
+
+		Map<String, Object> cm = ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Chambers of Xeric Challenge Mode (Team Size: 3) personal best: 35:53", "Tammz");
+		assertEquals("Challenge Mode", cm.get("mode"));
+		assertEquals(3, cm.get("teamSize"));
+		Map<String, Object> tob = ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Theatre of Blood: Hard Mode (Team Size: 5) personal best: 22:03.20", "Tammz");
+		assertEquals("Theatre of Blood", tob.get("boss"));
+		assertEquals("Hard Mode", tob.get("mode"));
+		assertEquals(5, tob.get("teamSize"));
+		Map<String, Object> toa = ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Tombs of Amascut: Expert Mode (Team Size: 2) personal best: 27:10", "Tammz");
+		assertEquals("Tombs of Amascut", toa.get("boss"));
+		assertEquals("Expert Mode", toa.get("mode"));
+		assertEquals(2, toa.get("teamSize"));
+		Map<String, Object> boss = ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Vardorvis personal best: 1:23.40", "Tammz");
+		assertEquals("Vardorvis", boss.get("boss"));
+		assertEquals(83.4, (Double) boss.get("seconds"), 0.001);
+	}
+
+	@Test
+	public void rejectsOtherPlayersAndAmbiguousGroupClanPbAnnouncements()
+	{
+		assertNull(ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Other player has achieved a new Chambers of Xeric (Team Size: Solo) personal best: 16:46", "Tammz"));
+		assertNull(ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Chambers of Xeric personal best: 16:46", "Tammz"));
+		assertNull(ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Chambers of Xeric (Team Size: Solo) personal best: 0:00", "Tammz"));
+		assertNull(ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has achieved a new Chambers of Xeric (Team Size: 25) personal best: 16:46", "Tammz"));
+		assertNull(ClanMessagesPlugin.parseClanPbAnnouncement(
+			"Tammz has completed Chambers of Xeric in 16:46", "Tammz"));
 	}
 
 	@Test
@@ -480,6 +530,55 @@ public class PbPayloadTest
 		assertEquals("The Leviathan", payload.get("boss"));
 		assertEquals("Awakened", payload.get("mode"));
 		assertEquals(337.2, (Double) payload.get("seconds"), 0.001);
+	}
+
+	@Test
+	public void dedupSignatureIgnoresTimeTypeSoBothPbSourcesMatch()
+	{
+		// The personal ToA "total completion time" message resolves to boss/mode via
+		// pbPayload(...) and submits with timeType "OVERALL". The clan-wide PB announcement
+		// for the exact same completion resolves the same raw text through the same
+		// pbPayload(...) and submits with timeType "". Both must collapse to the same dedup
+		// signature or the plugin fires two requests for a single PB.
+		Map<String, Object> fromGameMessage = ClanMessagesPlugin.pbPayload("Tombs of Amascut: Expert Mode", 3, 1500.0);
+		Map<String, Object> fromClanAnnouncement = ClanMessagesPlugin.pbPayload("Tombs of Amascut: Expert Mode", 3, 1500.0);
+		String gameSignature = ClanMessagesPlugin.pbDedupSignature("Tamzz",
+			(String) fromGameMessage.get("boss"), (String) fromGameMessage.get("mode"),
+			(Integer) fromGameMessage.get("teamSize"), 1500.0);
+		String announcementSignature = ClanMessagesPlugin.pbDedupSignature("Tamzz",
+			(String) fromClanAnnouncement.get("boss"), (String) fromClanAnnouncement.get("mode"),
+			(Integer) fromClanAnnouncement.get("teamSize"), 1500.0);
+		assertEquals(gameSignature, announcementSignature);
+	}
+
+	@Test
+	public void dedupSignatureStillDistinguishesDifferentRecords()
+	{
+		String base = ClanMessagesPlugin.pbDedupSignature("Tamzz", "Theatre of Blood", "Hard Mode", 5, 900.0);
+		assertFalse(base.equals(ClanMessagesPlugin.pbDedupSignature("Tamzz", "Theatre of Blood", "Hard Mode", 5, 901.0)));
+		assertFalse(base.equals(ClanMessagesPlugin.pbDedupSignature("Tamzz", "Theatre of Blood", "Hard Mode", 4, 900.0)));
+		assertFalse(base.equals(ClanMessagesPlugin.pbDedupSignature("Tamzz", "Theatre of Blood", "Normal", 5, 900.0)));
+		assertFalse(base.equals(ClanMessagesPlugin.pbDedupSignature("Noujain", "Theatre of Blood", "Hard Mode", 5, 900.0)));
+	}
+
+	// Real message from a Theatre of Blood Entry Mode run: unlike ToA's total-completion line,
+	// ToB's completion time line never repeats the difficulty - only the wave-complete line in
+	// the same chat message does. The plugin must recover "Entry Mode" from here, or it silently
+	// defaults to Normal when the pending PB is later submitted.
+	@Test
+	public void capturesDifficultyFromTheatreOfBloodWaveCompleteLine()
+	{
+		Map<String, Object> parsed = ClanMessagesPlugin.parseChatNewPb(
+			"Wave 'The Final Challenge' (Entry Mode) complete!<br>Duration: 2:16.80<br>"
+				+ "Theatre of Blood completion time: 12:41.40 (new personal best)");
+		assertEquals(761.4, (Double) parsed.get("seconds"), 0.001);
+		assertEquals("Entry Mode", parsed.get("mode"));
+		assertFalse("this message never names the raid itself", parsed.containsKey("boss"));
+
+		Map<String, Object> payload = ClanMessagesPlugin.pbPayload(
+			"Theatre of Blood " + parsed.get("mode"), 0, (Double) parsed.get("seconds"));
+		assertEquals("Theatre of Blood", payload.get("boss"));
+		assertEquals("Entry Mode", payload.get("mode"));
 	}
 
 	private static void assertRaid(String recorded, String boss, String mode)

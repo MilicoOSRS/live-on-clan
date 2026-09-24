@@ -39,6 +39,12 @@ tasks.register('run', JavaExec) {
 	mainClass = pluginMainClass
 
 	jvmArgs "-ea"
+	// This worktree's development client exercises cheap loot by default.
+	// The published plugin does not receive this JVM property.
+	jvmArgs '-Dliveon.lowValueDropTest=true'
+	if (project.hasProperty('lowValueClueTest')) {
+		jvmArgs '-Dliveon.lowValueClueTest=true'
+	}
 	args "--developer-mode", "--debug"
 }
 

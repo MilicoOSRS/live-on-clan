@@ -20,7 +20,7 @@ public class DropDeliveryClientTest
 	@Test
 	public void temporaryFailuresRetryButPermanentErrorsStop() throws Exception
 	{
-		for (int status : new int[] {429, 503, -1, 400, 401})
+		for (int status : new int[] {408, 425, 429, 503, -1, 400, 401})
 		{
 			ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 			java.util.concurrent.BlockingQueue<Runnable> queued = new java.util.concurrent.LinkedBlockingQueue<>();
@@ -36,7 +36,7 @@ public class DropDeliveryClientTest
 			try (DropDeliveryClient delivery = new DropDeliveryClient(http, queued::add, executor))
 			{
 				Request request = new Request.Builder().url("https://example.invalid/drop").build();
-				delivery.send(request, request, "simulation", () -> true);
+				delivery.send(request, request, "simulation", () -> DropSessionGate.State.READY);
 				queued.remove().run();
 				responded.get(5, TimeUnit.SECONDS);
 				Runnable retry = queued.poll(3, TimeUnit.SECONDS);
@@ -73,7 +73,7 @@ public class DropDeliveryClientTest
 		try (DropDeliveryClient delivery = new DropDeliveryClient(http, queued::add, executor))
 		{
 			Request request = new Request.Builder().url("https://example.invalid/drop").build();
-			delivery.send(request, request, "simulation", allowed::get);
+			delivery.send(request, request, "simulation", () -> allowed.get() ? DropSessionGate.State.READY : DropSessionGate.State.CANCEL);
 			queued.remove().run();
 			Runnable retry = queued.poll(5, TimeUnit.SECONDS);
 			assertNotNull(retry);
@@ -90,23 +90,68 @@ public class DropDeliveryClientTest
 	}
 
 	@Test
-	public void rechecksPermissionBeforeQueuedInitialSend()
+	public void acceptedDropGetsInitialAttemptInValidSession() throws Exception
 	{
 		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 		List<Runnable> queued = new ArrayList<>();
-		AtomicInteger checks = new AtomicInteger();
-		try (DropDeliveryClient delivery = new DropDeliveryClient(new OkHttpClient(), queued::add, executor))
+		AtomicInteger attempts = new AtomicInteger();
+		CompletableFuture<Void> sent = new CompletableFuture<>();
+		OkHttpClient http = new OkHttpClient.Builder().addInterceptor(chain -> {
+			attempts.incrementAndGet();
+			sent.complete(null);
+			return new Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+				.code(200).message("test").body(ResponseBody.create(null, "")).build();
+		}).build();
+		try (DropDeliveryClient delivery = new DropDeliveryClient(http, queued::add, executor))
 		{
 			Request request = new Request.Builder().url("https://example.invalid/drop").build();
-			delivery.send(request, request, "test", () -> { checks.incrementAndGet(); return false; });
+			delivery.send(request, request, "test", () -> DropSessionGate.State.READY);
 			queued.remove(0).run();
-			assertEquals(1, checks.get());
+			sent.get(5, TimeUnit.SECONDS);
+			assertEquals(1, attempts.get());
 		}
-		finally { executor.shutdownNow(); }
+		finally
+		{
+			executor.shutdownNow();
+			http.dispatcher().executorService().shutdownNow();
+			http.connectionPool().evictAll();
+		}
 	}
 
 	@Test
-	public void retryUsesLightweightRequestWithSameIdentity() throws Exception
+	public void retriesOversizedScreenshotWithoutAttachment() throws Exception
+	{
+		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+		AtomicInteger attempts = new AtomicInteger();
+		CompletableFuture<Void> completed = new CompletableFuture<>();
+		OkHttpClient http = new OkHttpClient.Builder().addInterceptor(chain -> {
+			int attempt = attempts.getAndIncrement();
+			assertEquals(attempt == 0 ? "with-image" : "without-image",
+				chain.request().header("Payload-Kind"));
+			if (attempt > 0) completed.complete(null);
+			return new Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+				.code(attempt == 0 ? 413 : 200).message("test")
+				.body(ResponseBody.create(null, "")).build();
+		}).build();
+		try (DropDeliveryClient delivery = new DropDeliveryClient(http, Runnable::run, executor))
+		{
+			Request initial = new Request.Builder().url("https://example.invalid/drop")
+				.header("Payload-Kind", "with-image").build();
+			Request retry = initial.newBuilder().header("Payload-Kind", "without-image").build();
+			delivery.send(initial, retry, "test", () -> DropSessionGate.State.READY);
+			completed.get(5, TimeUnit.SECONDS);
+			assertEquals(2, attempts.get());
+		}
+		finally
+		{
+			executor.shutdownNow();
+			http.dispatcher().executorService().shutdownNow();
+			http.connectionPool().evictAll();
+		}
+	}
+
+	@Test
+	public void temporaryFailureRetainsImageAndIdentity() throws Exception
 	{
 		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 		AtomicInteger attempts = new AtomicInteger();
@@ -114,7 +159,7 @@ public class DropDeliveryClientTest
 		OkHttpClient http = new OkHttpClient.Builder().addInterceptor(chain -> {
 			assertEquals("original-event", chain.request().header("Idempotency-Key"));
 			int attempt = attempts.getAndIncrement();
-			assertEquals(attempt == 0 ? "with-image" : "without-image",
+			assertEquals("with-image",
 				chain.request().header("Payload-Kind"));
 			if (attempt > 0) retried.complete(null);
 			return new Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
@@ -126,7 +171,7 @@ public class DropDeliveryClientTest
 			Request initial = new Request.Builder().url("https://example.invalid/drop")
 				.header("Idempotency-Key", "original-event").header("Payload-Kind", "with-image").build();
 			Request retry = initial.newBuilder().header("Payload-Kind", "without-image").build();
-			delivery.send(initial, retry, "test", () -> true);
+			delivery.send(initial, retry, "test", () -> DropSessionGate.State.READY);
 			retried.get(5, TimeUnit.SECONDS);
 			assertEquals(2, attempts.get());
 		}
