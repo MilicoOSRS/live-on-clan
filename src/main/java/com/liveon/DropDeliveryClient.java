@@ -9,7 +9,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.callback.ClientThread;
@@ -32,6 +32,12 @@ final class DropDeliveryClient implements AutoCloseable
 	private final ScheduledExecutorService executor;
 	private final Set<Call> calls = ConcurrentHashMap.newKeySet();
 	private final Set<ScheduledFuture<?>> retries = ConcurrentHashMap.newKeySet();
+	private DropOutbox outbox;
+	private DropDiagnosticJournal diagnosticJournal;
+	private Consumer<String> deliveredCallback;
+	enum Progress { QUEUED, FAILED, ACCEPTED, CANCELLED }
+	private java.util.function.BiConsumer<Request, Progress> progressListener;
+	private final Set<String> activeRecords = ConcurrentHashMap.newKeySet();
 	private final AtomicBoolean closed = new AtomicBoolean();
 
 	DropDeliveryClient(OkHttpClient httpClient, ClientThread clientThread, ScheduledExecutorService executor)
@@ -52,22 +58,85 @@ final class DropDeliveryClient implements AutoCloseable
 		this.executor = executor;
 	}
 
-	void send(Request initialRequest, Request retryRequest, String destination,
-		BooleanSupplier retryAllowed)
+	void setOutbox(DropOutbox outbox) { this.outbox = outbox; }
+	void setDiagnosticJournal(DropDiagnosticJournal journal) { diagnosticJournal = journal; }
+	void setDeliveredCallback(Consumer<String> callback) { deliveredCallback = callback; }
+	void setProgressListener(java.util.function.BiConsumer<Request, Progress> listener) { progressListener = listener; }
+	private void progress(Request request, Progress progress)
 	{
-		onClientThread.accept(() -> {
-			if (!closed.get())
-			{
-				send(initialRequest, retryRequest, destination, retryAllowed, 0);
-			}
+		if (progressListener != null)
+			onClientThread.accept(() -> { if (!closed.get()) progressListener.accept(request, progress); });
+	}
+
+	void recover(okhttp3.HttpUrl base, String player,
+		java.util.function.Function<String, DropSessionGate.State> permission)
+	{
+		if (outbox == null || base == null || closed.get()) return;
+		executor.execute(() -> {
+			try {
+				for (DropOutbox.Entry entry : outbox.pending(base, player)) {
+					if (activeRecords.contains(entry.id)) continue;
+					Request initial = entry.request(false).newBuilder().tag(String.class, entry.id).build();
+					Request retry = entry.request(true).newBuilder().tag(String.class, entry.id).build();
+					if (!activeRecords.add(entry.id)) continue;
+					onClientThread.accept(() -> dispatch(initial, retry, entry.destination,
+						() -> permission.apply(initial.url().encodedPath()), 0));
+				}
+			} catch (IOException | RuntimeException e) { log.warn("Unable to recover pending drop records", e); }
 		});
 	}
 
+	void send(Request initialRequest, Request retryRequest, String destination,
+		Supplier<DropSessionGate.State> retryAllowed)
+	{
+		if (closed.get()) return;
+		if (outbox == null) {
+			onClientThread.accept(() -> dispatch(initialRequest, retryRequest, destination, retryAllowed, 0));
+			return;
+		}
+		executor.execute(() -> {
+			Request initial = initialRequest;
+			Request retry = retryRequest;
+			try {
+				String id = outbox.save(initial, retry, destination);
+				trace(initial, "QUEUED", destination);
+				activeRecords.add(id);
+				initial = initial.newBuilder().tag(String.class, id).build();
+				retry = retry.newBuilder().tag(String.class, id).build();
+			} catch (IOException | RuntimeException e) {
+				log.warn("Unable to persist pending drop; attempting network delivery", e);
+				trace(initial, "PERSISTENCE_ERROR", destination);
+			}
+			final Request ready = initial, fallback = retry;
+			onClientThread.accept(() -> dispatch(ready, fallback, destination, retryAllowed, 0));
+		});
+	}
+
+	private void dispatch(Request request, Request retryRequest, String destination,
+		Supplier<DropSessionGate.State> state, int attempt)
+	{
+		if (closed.get()) return;
+		DropSessionGate.State current = state.get();
+		progress(request, Progress.QUEUED);
+		if (current == DropSessionGate.State.WAIT)
+			scheduleRetry(request, retryRequest, destination, state, attempt);
+		else if (current == DropSessionGate.State.READY)
+			send(request, retryRequest, destination, state, attempt);
+		else {
+			progress(request, Progress.CANCELLED);
+			trace(request, "CANCELLED", destination + " participation_disabled");
+			String id = request.tag(String.class); if (id != null) activeRecords.remove(id);
+		}
+	}
+
 	private void send(Request request, Request retryRequest, String destination,
-		BooleanSupplier retryAllowed, int attempt)
+		Supplier<DropSessionGate.State> retryAllowed, int attempt)
 	{
 		if (closed.get()) return;
 		log.debug("Starting {} server request (attempt {})", destination, attempt + 1);
+		trace(request, "SEND", destination + " attempt=" + (attempt + 1)
+			+ " image=" + (request.header("X-Live-On-Image") == null ? "unknown"
+				: request.header("X-Live-On-Image")));
 		Call call = httpClient.newCall(request);
 		calls.add(call);
 		if (closed.get())
@@ -85,7 +154,9 @@ final class DropDeliveryClient implements AutoCloseable
 				if (!closed.get())
 				{
 					log.debug("Unable to deliver {} (attempt {})", destination, attempt + 1, exception);
-					scheduleRetry(retryRequest, destination, retryAllowed, attempt);
+					trace(request, "NETWORK_ERROR", destination + " attempt=" + (attempt + 1));
+					progress(request, Progress.FAILED);
+					scheduleRetry(request, retryRequest, destination, retryAllowed, attempt);
 				}
 			}
 
@@ -109,30 +180,53 @@ final class DropDeliveryClient implements AutoCloseable
 					if (!response.isSuccessful())
 					{
 						log.debug("{} delivery returned {}: {}", destination, response.code(), responseBody);
+						trace(request, "HTTP", destination + " status=" + response.code());
 						if (response.code() == 413 && request != retryRequest)
 						{
 							// Preserve the notification when a proxy rejects only its screenshot.
-							send(retryRequest, retryRequest, destination, retryAllowed,
-								Math.min(1000, attempt + 1));
+							trace(request, "IMAGE_REJECTED", destination + " status=413");
+							onClientThread.accept(() -> dispatch(retryRequest, retryRequest, destination, retryAllowed,
+								Math.min(1000, attempt + 1)));
 							return;
 						}
 						if (response.code() == 408 || response.code() == 425
 							|| response.code() == 429 || response.code() >= 500)
 						{
-							scheduleRetry(retryRequest, destination, retryAllowed, attempt);
+							// 425 means the same event is still processing, not a confirmed failure.
+							if (response.code() != 425) progress(request, Progress.FAILED);
+							scheduleRetry(request, retryRequest, destination, retryAllowed, attempt);
 						}
 					}
 					else
 					{
 						log.debug("{} server response (attempt {}): {}", destination, attempt + 1, responseBody);
+						String result = responseBody.contains("\"filtered\"") ? "filtered"
+							: responseBody.contains("\"duplicate\": true") || responseBody.contains("\"duplicate\":true")
+								? "duplicate" : responseBody.contains("\"forwarded\": true")
+									|| responseBody.contains("\"forwarded\":true") ? "relay_accepted" : "accepted";
+						trace(request, "HTTP", destination + " status=" + response.code() + " result=" + result);
+						progress(request, "filtered".equals(result) ? Progress.CANCELLED : Progress.ACCEPTED);
+						if (deliveredCallback != null)
+							onClientThread.accept(() -> { if (!closed.get()) deliveredCallback.accept(destination); });
+						if (outbox != null) {
+							String id = request.tag(String.class);
+							try { outbox.complete(id); if (id != null) activeRecords.remove(id); }
+							catch (IOException e) { log.warn("Unable to acknowledge persisted drop", e); }
+						}
 					}
 				}
 			}
 		});
 	}
 
-	private synchronized void scheduleRetry(Request request, String destination,
-		BooleanSupplier retryAllowed, int attempt)
+	private void trace(Request request, String stage, String detail)
+	{
+		if (diagnosticJournal != null)
+			diagnosticJournal.record(request.header("X-Live-On-Event"), stage, detail);
+	}
+
+	private synchronized void scheduleRetry(Request request, Request retryRequest, String destination,
+		Supplier<DropSessionGate.State> retryAllowed, int attempt)
 	{
 		if (closed.get() || executor.isShutdown()) return;
 		long delaySeconds = Math.min(MAX_RETRY_DELAY_SECONDS,
@@ -146,13 +240,8 @@ final class DropDeliveryClient implements AutoCloseable
 					retries.remove(reference.get());
 				}
 				if (closed.get()) return;
-				onClientThread.accept(() -> {
-					if (!closed.get() && retryAllowed.getAsBoolean())
-					{
-						send(request, request, destination, retryAllowed,
-							Math.min(1000, attempt + 1));
-					}
-				});
+				onClientThread.accept(() -> dispatch(request, retryRequest, destination, retryAllowed,
+					Math.min(1000, attempt + 1)));
 			}, delaySeconds, TimeUnit.SECONDS);
 			reference.set(retry);
 			retries.add(retry);
