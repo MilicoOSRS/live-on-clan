@@ -180,7 +180,7 @@ public class DropWireIntegrationTest
 			payload.put("embeds", Collections.singletonList(embed));
 			DropMultipartPayload bodies = DropMultipartPayload.create(gson, payload, embed, image, "loot.png");
 			Request request = new Request.Builder().url("https://example.invalid/drop").post(bodies.initialBody).build();
-			delivery.send(request, request.newBuilder().post(bodies.retryBody).build(), "simulation", () -> true);
+			delivery.send(request, request.newBuilder().post(bodies.retryBody).build(), "simulation", () -> DropSessionGate.State.READY);
 		}
 
 		JsonObject next() throws InterruptedException
