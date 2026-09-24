@@ -118,14 +118,39 @@ public class ClanMessagesPlugin extends Plugin
 		Pattern.CASE_INSENSITIVE);
 	private static final Pattern PB_RAID_TOTAL_PATTERN = Pattern.compile(
 		"^(?<boss>Tombs of Amascut(?::? (?:Expert Mode|Entry Mode))?) total completion time: (?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)", Pattern.CASE_INSENSITIVE);
+	// Theatre of Blood's total-completion line never repeats "(Entry Mode)"/"(Hard Mode)" -
+	// only the preceding wave-complete line does - so its mode has to come from whatever the
+	// room-time message alongside it just stored in pendingPbMode.
+	private static final Pattern PB_TOB_TOTAL_PATTERN = Pattern.compile(
+		"^(?<boss>Theatre of Blood) total completion time: (?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)", Pattern.CASE_INSENSITIVE);
 	private static final Pattern PB_NEW_TIME_PATTERN = Pattern.compile(
 		"(?i)(?:(?:Fight |Lap |Challenge |Corrupted challenge )?duration:|Subdued in|(?<!total )completion time:).*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)");
+	// Theatre of Blood's wave-complete line is the only message that names the difficulty
+	// (e.g. "Wave 'The Final Challenge' (Entry Mode) complete!"); the total/challenge time
+	// lines that follow in the same chat message never repeat it, so a boss-less pending PB
+	// would default to Normal mode unless this is captured alongside the time.
+	private static final Pattern PB_MODE_PATTERN = Pattern.compile(
+		"\\((?<mode>Entry Mode|Hard Mode|Expert Mode|Challenge Mode)\\)", Pattern.CASE_INSENSITIVE);
+	// Same difficulty tag, but matched on every wave-complete line regardless of whether that
+	// particular wave set a new personal best - unlike PB_MODE_PATTERN's callers, which only run
+	// once a "(new personal best)" has already been confirmed.
+	private static final Pattern WAVE_COMPLETE_PATTERN = Pattern.compile(
+		"^Wave '.*?' \\((?<mode>Entry Mode|Hard Mode|Expert Mode|Challenge Mode)\\) complete!",
+		Pattern.CASE_INSENSITIVE);
 	private static final Pattern PB_RAID_PATTERN = Pattern.compile(
 		"Team size:.*?" + PB_TEAM_SIZE + ".*?Duration:.*?(?<pb>[0-9:]+(?:\\.[0-9]+)?)\\s*\\(new personal best\\)",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern CLAN_PB_ANNOUNCEMENT_PATTERN = Pattern.compile(
+		"^(?<player>.+?) has achieved a new (?<activity>.+?) personal best: (?<pb>[0-9:]+(?:\\.[0-9]+)?)\\.?$",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern CLAN_PB_TEAM_SIZE_PATTERN = Pattern.compile(
+		"\\s*\\(Team Size:\\s*(?<size>Solo|\\d+(?:\\+|-\\d+)?(?:\\s*players?)?)\\)",
 		Pattern.CASE_INSENSITIVE);
 	private static final long RAID_LOOT_CONTEXT_WAIT_MILLIS = 1500L;
 	private static final long CLUE_WIDGET_FALLBACK_WAIT_MILLIS = 1500L;
 	private static final long MVP_DROP_MINIMUM_VALUE = 1_000_000L;
+	private static final String LOW_VALUE_CLUE_TEST_PROPERTY = "liveon.lowValueClueTest";
+	private static final String LOW_VALUE_DROP_TEST_PROPERTY = "liveon.lowValueDropTest";
 	private static final Pattern ADVENTURE_LOG_TITLE_PATTERN = Pattern.compile("The Exploits of (.+)");
 	private static final Pattern ADVENTURE_LOG_PB_PATTERN = Pattern.compile(
 		"^Fastest (?<kind>kill|run|Room time|Overall time)"
@@ -224,7 +249,10 @@ public class ClanMessagesPlugin extends Plugin
 
 	private ScheduledExecutorService executor;
 	private volatile DropDeliveryClient dropDeliveryClient;
+	private DropDiagnosticJournal dropDiagnosticJournal;
+	private DropFrameCapture dropFrameCapture;
 	private final DropScreenshotEncoder dropScreenshotEncoder = new DropScreenshotEncoder();
+	private final NpcLootEventGate npcLootEventGate = new NpcLootEventGate();
 	private ClanMessagesPanel panel;
 	private NavigationButton navigationButton;
 	// WOM membership cache: rsn (lowercase) -> CacheEntry
@@ -260,6 +288,10 @@ public class ClanMessagesPlugin extends Plugin
 	private volatile boolean isStaff = false;
 	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
+	private final MembershipRecovery membershipRecovery = new MembershipRecovery();
+	private final RecoveryNotice recoveryNotice = new RecoveryNotice();
+	private String recoveryNoticeAccount = "";
+	private final java.util.Set<String> queuedPbSignatures = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private volatile String authenticatedPlayerName = "";
 	private int lastCombatAchievementPoints = -1;
 	private String combatAchievementAccount = "";
@@ -294,7 +326,25 @@ public class ClanMessagesPlugin extends Plugin
 	private String pendingPbBoss;
 	private double pendingPbSeconds = -1;
 	private int pendingPbTeamSize;
+	private String pendingPbMode;
+	// Theatre of Blood's wave-complete line carries the difficulty even when that specific wave
+	// didn't set a new room-time PB (no "(new personal best)" tag, so parseChatNewPb never sees
+	// it). Tracked separately with its own tick so the total-completion message can still fall
+	// back to it when only the Overall PB improved - but only within a tight, same-event window,
+	// never across unrelated later raids.
+	private String lastWaveMode;
+	private int lastWaveModeTick = -1;
+	private static final int LAST_WAVE_MODE_MAX_TICKS = 5;
 	private int pendingPbTick = -1;
+	// Chambers of Xeric and Theatre of Blood never send a correlating kill-count chat message,
+	// so a raid completion broadcast ("Duration: ... (new personal best)", or "Team size: ...
+	// Duration: ...") can sit unresolved as pendingPbSeconds with no boss name. Give the actual
+	// reward chest - which unambiguously names the raid - a wide window to rescue it: measured
+	// gaps between the chat message and the chest were ~8 ticks (CoX) and ~32 ticks (ToB), so
+	// 30 was already too tight and lost a real ToB PB. This must stay generous, not tight,
+	// since the cost of a wider window is holding stale state a bit longer, while the cost of
+	// too narrow a window is silently losing a PB with no trace.
+	private static final int PENDING_RAID_PB_MAX_TICKS = 80;
 	private final java.util.Set<String> submittedPbSignatures = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private int combatAchievementPbScanTicks;
 	private String visibleCombatAchievementPage = "";
@@ -310,6 +360,7 @@ public class ClanMessagesPlugin extends Plugin
 	private int pendingClueCount = -1;
 	private int pendingClueTicks;
 	private boolean pendingClueReward;
+	private boolean lowValueTestNoticeShown;
 	private final ClueRewardGate clueRewardGate = new ClueRewardGate();
 
 	private static <T> java.util.Map<String, T> boundedDropMap()
@@ -357,8 +408,24 @@ public class ClanMessagesPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		if (Boolean.getBoolean(LOW_VALUE_DROP_TEST_PROPERTY))
+		{
+			log.info("Live On local low-value drop test mode enabled");
+		}
 		executor = Executors.newSingleThreadScheduledExecutor();
 		dropDeliveryClient = new DropDeliveryClient(okHttpClient, clientThread, executor);
+		dropDiagnosticJournal = new DropDiagnosticJournal(
+			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/drop-diagnostics.log"), executor);
+		dropDeliveryClient.setDiagnosticJournal(dropDiagnosticJournal);
+		dropDeliveryClient.setDeliveredCallback(destination -> {
+			if ("MVP drop".equals(destination)) fetchMvpDrops();
+			if ("PB".equals(destination)) fetchPbCategories();
+		});
+		dropDeliveryClient.setProgressListener(this::onDeliveryProgress);
+		dropDeliveryClient.setOutbox(new DropOutbox(
+			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/pending-drops"), gson));
+		dropFrameCapture = new DropFrameCapture(executor,
+			action -> clientThread.invokeLater(action), drawManager::requestNextFrameListener);
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		eventOverlay = new ClanEventOverlay(this);
@@ -399,6 +466,11 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			dropDeliveryClient.close();
 			dropDeliveryClient = null;
+		}
+		if (dropFrameCapture != null)
+		{
+			dropFrameCapture.close();
+			dropFrameCapture = null;
 		}
 		dropScreenshotEncoder.clear();
 		connectionSessionGeneration.incrementAndGet();
@@ -448,6 +520,10 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		verifiedAccount = "";
 		authenticatedPlayerName = "";
+		recoveryNotice.reset();
+		recoveryNoticeAccount = "";
+		queuedPbSignatures.clear();
+		membershipRecovery.accountChanged();
 		submittedPbSignatures.clear();
 		visibleCombatAchievementPage = "";
 		isStaff = false;
@@ -508,6 +584,9 @@ public class ClanMessagesPlugin extends Plugin
 				}
 			}
 			configurePolling();
+			if ("statsEnabled".equals(event.getKey()) || "discordDropsEnabled".equals(event.getKey())
+				|| "pbRankingEnabled".equals(event.getKey()))
+				clientThread.invokeLater(this::recoverPendingDrops);
 		}
 	}
 
@@ -586,21 +665,46 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
+		// SPAM is the type OSRS/RuneLite gives many kill-count/completion-count messages
+		// (e.g. "Your completed Theatre of Blood: Entry Mode count is: 69.") - the same
+		// category some players have chat filters hiding. It carries real PB correlation
+		// data our tight regexes below already gate on, so it's safe to fold in here.
 		if (event.getType() != ChatMessageType.GAMEMESSAGE
 			&& event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION
-			&& event.getType() != ChatMessageType.CLAN_MESSAGE)
+			&& event.getType() != ChatMessageType.CLAN_MESSAGE
+			&& event.getType() != ChatMessageType.SPAM)
 		{
 			return;
 		}
 		String message = Text.removeTags(event.getMessage()).replace('\u00A0', ' ').trim();
+		if (isPbParticipationEnabled() && client.getLocalPlayer() != null)
+		{
+			safeCapturePb(() -> {
+				Map<String, Object> announcedPb = parseClanPbAnnouncement(message, client.getLocalPlayer().getName());
+				if (announcedPb != null)
+				{
+					String boss = (String) announcedPb.get("boss");
+					// The clan-wide announcement always reports the room/challenge-time PB (the
+					// same stat ChatCommandsPlugin tracks as "the" personal best) - ToA/ToB's
+					// separate "Overall" total is never broadcast to the clan this way.
+					submitPb(boss, (String) announcedPb.get("mode"),
+						(Integer) announcedPb.get("teamSize"), (Double) announcedPb.get("seconds"),
+						roomTimeType(boss));
+				}
+			});
+		}
 		if (event.getType() == ChatMessageType.GAMEMESSAGE
-			|| event.getType() == ChatMessageType.FRIENDSCHATNOTIFICATION)
+			|| event.getType() == ChatMessageType.FRIENDSCHATNOTIFICATION
+			|| event.getType() == ChatMessageType.SPAM)
 		{
 			rememberLootCount(message);
 			rememberClueCompletion(message);
 			if (isPbParticipationEnabled())
 			{
-				capturePersonalBest(message);
+				safeCapturePb(() -> {
+					rememberWaveMode(message);
+					capturePersonalBest(message);
+				});
 			}
 		}
 		if (event.getType() == ChatMessageType.GAMEMESSAGE
@@ -804,7 +908,9 @@ public class ClanMessagesPlugin extends Plugin
 	public void onServerNpcLoot(ServerNpcLoot event)
 	{
 		String source = Text.removeTags(event.getComposition().getName());
+		log.debug("Server NPC loot event: source={}, items={}", source, event.getItems().size());
 		if (!usesServerNpcLoot(event.getComposition().getId(), source)) return;
+		npcLootEventGate.recordPrimary(localRecordAccount(), source, event.getItems(), client.getTickCount());
 		detectLoot(source, event.getItems(), "NPC", event.getComposition().getId(), null);
 	}
 
@@ -830,8 +936,15 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe(priority = 1)
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
-		if (event.getNpc() == null) return;
+		if (event.getNpc() == null)
+		{
+			log.debug("NPC loot event ignored: NPC unavailable");
+			return;
+		}
+		log.debug("NPC loot event: source={}, items={}", event.getNpc().getName(), event.getItems().size());
 		if (!usesNpcLootReceived(event.getNpc().getId(), event.getNpc().getName())) return;
+		npcLootEventGate.recordPrimary(localRecordAccount(), event.getNpc().getName(),
+			event.getItems(), client.getTickCount());
 		detectLoot(event.getNpc().getName(), event.getItems(), LootRecordType.NPC.name(),
 			event.getNpc().getId(), null);
 	}
@@ -839,6 +952,36 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onLootReceived(LootReceived event)
 	{
+		log.debug("Loot tracker event: type={}, source={}, items={}",
+			event.getType(), event.getName(), event.getItems().size());
+		if (usesNpcTrackerFallback(event.getType(), event.getName()))
+		{
+			String source = event.getName();
+			List<ItemStack> items = groupDropStacks(event.getItems());
+			if (items.isEmpty()) return;
+			String account = localRecordAccount();
+			long generation = connectionSessionGeneration.get();
+			int tick = client.getTickCount();
+			String dropEventId = UUID.randomUUID().toString();
+			clientThread.invokeLater(() -> {
+				DropSessionGate.State state = DropSessionGate.evaluate(generation,
+					connectionSessionGeneration.get(), account, localRecordAccount(),
+					config.enabled() && (config.statsEnabled() || config.discordDropsEnabled()), client.getGameState());
+				if (state == DropSessionGate.State.WAIT) return false;
+				if (state == DropSessionGate.State.CANCEL)
+				{
+					// Unlike detectLoot()'s own gate, this path used to cancel silently with no
+					// trace at all. Record it so a genuine auth/session hiccup is provable later.
+					dropDiagnosticJournal.record(dropEventId, "SESSION", "state=CANCEL source=" + source);
+					return true;
+				}
+				if (npcLootEventGate.consumePrimary(account, source, items, tick)) return true;
+				log.debug("NPC tracker-only loot accepted: source={}, items={}", source, items.size());
+				detectLoot(source, items, LootRecordType.NPC.name(), null, null, dropEventId);
+				return true;
+			});
+			return;
+		}
 		if (usesLootReceived(event.getType(), event.getName()))
 		{
 			if (event.getType() == LootRecordType.EVENT && event.getName() != null
@@ -858,30 +1001,90 @@ public class ClanMessagesPlugin extends Plugin
 	private void detectLoot(String source, Collection<ItemStack> items, String category,
 		Integer npcId, Long singleItemValueOverride)
 	{
-		if (!dropParticipationEnabled()) return;
+		detectLoot(source, items, category, npcId, singleItemValueOverride,
+			UUID.randomUUID().toString());
+	}
+
+	private void detectLoot(String source, Collection<ItemStack> items, String category,
+		Integer npcId, Long singleItemValueOverride, String dropEventId)
+	{
+		try
+		{
+			processDetectedLoot(source, items, category, npcId, singleItemValueOverride, dropEventId);
+		}
+		catch (RuntimeException exception)
+		{
+			recordDropFailure(dropEventId, "DETECT", exception);
+		}
+	}
+
+	private void processDetectedLoot(String source, Collection<ItemStack> items, String category,
+		Integer npcId, Long singleItemValueOverride, String dropEventId)
+	{
+		if (!canCaptureOwnRecord(config.discordDropsEnabled() || config.statsEnabled()))
+		{
+			long generation = connectionSessionGeneration.get();
+			String account = client.getLocalPlayer() == null ? verifiedAccount
+				: WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+			DropSessionGate.State state = dropSessionState(generation, account);
+			dropDiagnosticJournal.record(dropEventId, "SESSION", "state=" + state);
+			log.debug("Drop event not ready: source={}, state={}, gameState={}",
+				source, state, client.getGameState());
+			if (state == DropSessionGate.State.WAIT)
+			{
+				List<ItemStack> pendingItems = groupDropStacks(items);
+				runWhenDropSessionReady(generation, account,
+					() -> detectLoot(source, pendingItems, category, npcId, singleItemValueOverride,
+						dropEventId));
+			}
+			return;
+		}
 		List<ItemStack> grouped = groupDropStacks(items);
 		List<ItemStack> immediate = new ArrayList<>(grouped);
 		if (grouped.isEmpty()) return;
 		String eventSource = standardizeKnownLootSource(normalizeDropSource(source));
 		RaidLootContext.Completion completion = raidLootContext.take(eventSource, category, client.getTickCount());
 		String normalizedSource = completion == null ? eventSource : completion.source;
-		Integer killCount = completion == null ? readDropKillCount(category, normalizedSource) : completion.count;
+		// Kill count is cosmetic metadata for the notification, never a precondition for
+		// sending it (matching Dink's approach: an unresolved kc shows as "unknown" rather
+		// than blocking delivery). Any failure resolving it must not cost the drop itself -
+		// duplicating a delivery is preferable to silently losing one.
+		Integer killCount = safeKillCount(completion, category, normalizedSource);
 		if (RaidLootContext.isRaid(eventSource))
 		{
-			log.debug("Raid loot received: eventSource={}, resolvedSource={}, kc={}, minimumValue={}",
-					eventSource, normalizedSource, killCount, Math.max(0, config.discordDropMinimumValue()));
+			rescuePendingRaidPb(eventSource);
+			log.debug("Raid loot received: eventSource={}, resolvedSource={}, kc={}, items={}",
+					eventSource, normalizedSource, killCount,
+					grouped.stream().map(item -> item.getId() + "x" + item.getQuantity())
+						.collect(java.util.stream.Collectors.joining(",")));
 		}
 		boolean sendImmediate = !immediate.isEmpty();
 		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
+		// The accepted loot event is enough to record MVP drops. A missing or delayed
+		// screenshot must not prevent the account's drop from reaching the server.
+		dropDiagnosticJournal.record(dropEventId, "DETECTED", "items=" + grouped.size());
+		log.debug("Drop {} detected: source={}, category={}, items={}", dropEventId,
+			normalizedSource, category, grouped.size());
+		recordMvpDrops(immediate, normalizedSource, singleItemValueOverride, dropEventId);
+		final String dropPlayer = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+		final long dropGeneration = connectionSessionGeneration.get();
+		final Map<String, Object> identity = new LinkedHashMap<>();
+		identity.put("accountType", String.valueOf(client.getAccountType()));
+		identity.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
+		identity.put("world", client.getWorld());
+		identity.put("dinkAccountHash", liveOnAccountHash(dropPlayer));
 		captureDetectedDrop(image -> {
-			long deliveryGeneration = connectionSessionGeneration.get();
-			String deliveryAccount = authenticatedPlayerName;
-			Runnable delivery = () -> {
-				if (!isCurrentConnectionSession(deliveryGeneration, deliveryAccount)) return;
+			dropDiagnosticJournal.record(dropEventId, "CAPTURE", image == null ? "missing" : "available");
+			log.debug("Drop {} capture complete: hasFrame={}", dropEventId, image != null);
+			if (RaidLootContext.isRaid(eventSource))
+				log.debug("Raid drop screenshot selected: source={}, hasFrame={}", eventSource, image != null);
+			java.util.function.Consumer<java.awt.Image> deliver = frame -> {
 				RaidLootContext.Completion ready = completion != null ? completion
-					: raidLootContext.take(eventSource, category, client.getTickCount());
+					: dropGeneration == connectionSessionGeneration.get() && dropPlayer.equals(authenticatedPlayerName)
+						? raidLootContext.take(eventSource, category, client.getTickCount()) : null;
 				String deliverySource = ready == null ? normalizedSource : ready.source;
-				Integer deliveryCount = ready == null ? killCount : ready.count;
+				// Same principle as safeKillCount(): never let this be a precondition for delivery.
+				Integer deliveryCount = ready == null ? killCount : safeCount(ready.count);
 				if (RaidLootContext.isRaid(eventSource))
 				{
 					log.debug("Raid loot delivery: eventSource={}, deliverySource={}, kc={}",
@@ -889,17 +1092,20 @@ public class ClanMessagesPlugin extends Plugin
 				}
 				if (sendImmediate)
 					notifyDiscordDrop(deliverySource, immediate, category, npcId, singleItemValueOverride,
-						image, deliveryCount);
-				notifyBingoDrops(deliverySource, grouped, category, image);
+						frame, deliveryCount, dropPlayer, identity, dropEventId);
+				if (dropGeneration == connectionSessionGeneration.get() && dropPlayer.equals(authenticatedPlayerName))
+					notifyBingoDrops(deliverySource, grouped, category, frame);
 			};
+			Runnable delivery = () -> deliverWithFallback(dropEventId, image, deliver);
 			// RuneLite can publish the generic raid loot event before its mode-specific
 			// completion message. Give that message a short, non-blocking window to arrive.
 			if (completion == null && RaidLootContext.isGenericRaid(eventSource)
 				&& executor != null && !executor.isShutdown())
 			{
 				executor.schedule(() -> clientThread.invokeLater(() -> {
-					if (dropParticipationEnabled()) delivery.run();
-				}), RAID_LOOT_CONTEXT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+					if (config.enabled()) delivery.run();
+				}),
+					RAID_LOOT_CONTEXT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
 			}
 			else
 			{
@@ -908,20 +1114,109 @@ public class ClanMessagesPlugin extends Plugin
 		});
 	}
 
-	private void rememberLootCount(String message)
+	// The screenshot is the only optional input to a drop notification. If preparing the request
+	// fails, retry once without it: a possible duplicate is preferable to a lost drop.
+	// Mirrors detectLoot()'s guard: a PB parsed from chat must not be lost to an unexpected
+	// exception, and the failure must be traceable without needing the player's full client log.
+	private void safeCapturePb(Runnable capture)
 	{
-		Matcher matcher = PB_KILLCOUNT_PATTERN.matcher(message);
-		if (!matcher.find()) return;
 		try
 		{
-			lastLootCountSource = normalizeDropSource(matcher.group("boss"));
-			lastLootCount = Integer.parseInt(matcher.group("kc").replace(",", ""));
-			lastLootCountTick = client.getTickCount();
-			raidLootContext.remember(lastLootCountSource, lastLootCount, lastLootCountTick);
+			capture.run();
+		}
+		catch (RuntimeException exception)
+		{
+			recordDropFailure(UUID.randomUUID().toString(), "PB_CHAT", exception);
+		}
+	}
+
+	private void deliverWithFallback(String dropEventId, java.awt.Image image,
+		java.util.function.Consumer<java.awt.Image> deliver)
+	{
+		try
+		{
+			deliver.accept(image);
+		}
+		catch (RuntimeException exception)
+		{
+			recordDropFailure(dropEventId, "DELIVERY", exception);
+			if (image == null) return;
+			try
+			{
+				deliver.accept(null);
+			}
+			catch (RuntimeException retryException)
+			{
+				recordDropFailure(dropEventId, "DELIVERY_NO_IMAGE", retryException);
+			}
+		}
+	}
+
+	// RuneLite's EventBus only logs subscriber exceptions to client.log; keep a trace in the
+	// plugin's own journal so a lost drop is diagnosable without the player's full client log.
+	private void recordDropFailure(String dropEventId, String stage, RuntimeException exception)
+	{
+		log.warn("Drop {} failed at {}", dropEventId, stage, exception);
+		String location = "unknown";
+		for (StackTraceElement frame : exception.getStackTrace())
+		{
+			if (frame.getClassName().startsWith("com.liveon"))
+			{
+				location = frame.getMethodName() + ":" + frame.getLineNumber();
+				break;
+			}
+		}
+		dropDiagnosticJournal.record(dropEventId, "ERROR",
+			stage + " " + exception.getClass().getSimpleName() + " at " + location);
+	}
+
+	private void rememberLootCount(String message)
+	{
+		Map.Entry<String, Integer> parsed = parseLootCountMessage(message);
+		if (parsed == null) return;
+		lastLootCountSource = parsed.getKey();
+		lastLootCount = parsed.getValue();
+		lastLootCountTick = client.getTickCount();
+		raidLootContext.remember(lastLootCountSource, lastLootCount, lastLootCountTick);
+	}
+
+	private void rememberWaveMode(String message)
+	{
+		Matcher wave = WAVE_COMPLETE_PATTERN.matcher(message);
+		if (!wave.find()) return;
+		lastWaveMode = wave.group("mode");
+		lastWaveModeTick = client.getTickCount();
+	}
+
+	// Prefer the mode already tied to this specific pending PB (pendingPbMode, set when the room-
+	// time message itself was a new PB); otherwise fall back to the most recent wave-complete
+	// line, but only if it's from the same event (a few ticks old), never a stale one left over
+	// from some earlier, unrelated raid.
+	private String resolvePendingMode()
+	{
+		if (pendingPbMode != null) return pendingPbMode;
+		if (lastWaveModeTick >= 0 && client.getTickCount() - lastWaveModeTick <= LAST_WAVE_MODE_MAX_TICKS)
+			return lastWaveMode;
+		return null;
+	}
+
+	// Extracted for testing: this is the message a raid chest's kill-count correlation
+	// depends on, e.g. "Your completed Chambers of Xeric count is: 1,360." - it does not
+	// always appear (a solo Chambers of Xeric run can complete without it), which is why
+	// killCount must stay optional metadata rather than a precondition for delivery.
+	static Map.Entry<String, Integer> parseLootCountMessage(String message)
+	{
+		Matcher matcher = PB_KILLCOUNT_PATTERN.matcher(message);
+		if (!matcher.find()) return null;
+		try
+		{
+			String source = normalizeDropSource(matcher.group("boss"));
+			int count = Integer.parseInt(matcher.group("kc").replace(",", ""));
+			return new java.util.AbstractMap.SimpleImmutableEntry<>(source, count);
 		}
 		catch (NumberFormatException ignored)
 		{
-			lastLootCount = -1;
+			return null;
 		}
 	}
 
@@ -965,28 +1260,17 @@ public class ClanMessagesPlugin extends Plugin
 			|| (type == LootRecordType.NPC && isSpecialLootNpc(name));
 	}
 
+	static boolean usesNpcTrackerFallback(LootRecordType type, String name)
+	{
+		return type == LootRecordType.NPC && !isSpecialLootNpc(name);
+	}
+
 	private void captureDetectedDrop(java.util.function.Consumer<java.awt.Image> delivery)
 	{
-		long generation = connectionSessionGeneration.get();
-		String account = authenticatedPlayerName;
-		AtomicBoolean delivered = new AtomicBoolean();
-		java.util.function.Consumer<java.awt.Image> deliverOnClient = image -> clientThread.invokeLater(() -> {
-			if (isCurrentConnectionSession(generation, account) && dropParticipationEnabled()
-				&& delivered.compareAndSet(false, true)) delivery.accept(image);
-		});
-		Runnable withoutImage = () -> {
-			deliverOnClient.accept(null);
-		};
-		try
-		{
-			drawManager.requestNextFrameListener(deliverOnClient);
-			executor.schedule(withoutImage, 2, TimeUnit.SECONDS);
-		}
-		catch (RuntimeException exception)
-		{
-			log.debug("Unable to request drop screenshot", exception);
-			withoutImage.run();
-		}
+		DropFrameCapture capture = dropFrameCapture;
+		if (capture != null)
+			capture.capture(() -> config.enabled() && (config.discordDropsEnabled() || config.statsEnabled())
+				? DropSessionGate.State.READY : DropSessionGate.State.CANCEL, delivery);
 	}
 
 	private List<ItemStack> groupDropStacks(Collection<ItemStack> items)
@@ -1077,6 +1361,96 @@ public class ClanMessagesPlugin extends Plugin
 				.equals(WomMembership.normalizePlayerName(client.getLocalPlayer().getName()));
 	}
 
+	private String localRecordAccount()
+	{
+		return client.getLocalPlayer() == null ? ""
+			: WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+	}
+
+	private boolean canCaptureOwnRecord(boolean featureEnabled)
+	{
+		String account = localRecordAccount();
+		return config.enabled() && featureEnabled && !account.isEmpty() && !isTemporaryLootWorld()
+			&& !(account.equalsIgnoreCase(verifiedAccount) && membershipRecovery.rejected());
+	}
+
+	private DropSessionGate.State recordDeliveryState(String account, boolean featureEnabled)
+	{
+		return RecordDeliveryGate.evaluate(account, localRecordAccount(), authenticatedPlayerName,
+			config.enabled() && featureEnabled, isTemporaryLootWorld(),
+			account != null && account.equalsIgnoreCase(verifiedAccount) && membershipRecovery.rejected(),
+			client.getGameState());
+	}
+
+	private void onDeliveryProgress(Request request, DropDeliveryClient.Progress progress)
+	{
+		String account = localRecordAccount();
+		if (account.isEmpty() && (client.getGameState() == GameState.LOADING
+			|| client.getGameState() == GameState.CONNECTION_LOST)) account = verifiedAccount;
+		if (!config.enabled() || account.isEmpty()
+			|| !account.equalsIgnoreCase(request.header("X-Live-On-Player"))) return;
+		if (!account.equalsIgnoreCase(recoveryNoticeAccount))
+		{
+			recoveryNotice.reset();
+			recoveryNoticeAccount = account;
+		}
+		String key = request.tag(String.class);
+		if (key == null) key = request.url() + "\n" + request.header("X-Live-On-Event");
+		switch (progress)
+		{
+			case QUEUED: recoveryNotice.queued(key); break;
+			case FAILED: recoveryNotice.failed(key); break;
+			case ACCEPTED: recoveryNotice.accepted(key); break;
+			case CANCELLED: recoveryNotice.cancelled(key); break;
+		}
+	}
+
+	private void pollRecoveryNotice()
+	{
+		String account = localRecordAccount();
+		if (account.isEmpty() && config.enabled() && (client.getGameState() == GameState.LOADING
+			|| client.getGameState() == GameState.CONNECTION_LOST)) return;
+		if (!config.enabled() || account.isEmpty() || !account.equalsIgnoreCase(recoveryNoticeAccount))
+		{
+			recoveryNotice.reset();
+			recoveryNoticeAccount = account;
+			return;
+		}
+		RecoveryNotice.Message notice = recoveryNotice.poll(System.currentTimeMillis(),
+			account.equalsIgnoreCase(verifiedAccount) && membershipRecovery.failed(),
+			account.equalsIgnoreCase(authenticatedPlayerName));
+		if (notice == RecoveryNotice.Message.NONE) return;
+		String text = notice == RecoveryNotice.Message.WAITING
+			? "Falha temporária confirmada. Há registros aguardando envio; tentaremos novamente automaticamente."
+			: "Envios pendentes recuperados e aceitos pelo servidor.";
+		chatMessageManager.queue(QueuedMessage.builder().type(ChatMessageType.CONSOLE)
+			.runeLiteFormattedMessage(new ChatMessageBuilder().append(Color.YELLOW, "[Live On] " + text).build())
+			.build());
+	}
+
+	private void recordMvpDrops(Collection<ItemStack> items, String source, Long singleItemValueOverride,
+		String dropEventId)
+	{
+		if (!config.statsEnabled() || items.isEmpty() || isTemporaryLootWorld())
+		{
+			dropDiagnosticJournal.record(dropEventId, "MVP_SKIPPED", "participation_or_items");
+			return;
+		}
+		long totalValue = 0;
+		for (ItemStack item : items)
+		{
+			totalValue += effectiveDropValue(item, items.size(), singleItemValueOverride);
+		}
+		boolean lowValueDropTest = Boolean.getBoolean(LOW_VALUE_DROP_TEST_PROPERTY)
+			|| (Boolean.getBoolean(LOW_VALUE_CLUE_TEST_PROPERTY)
+				&& source != null && source.toLowerCase(java.util.Locale.ROOT).startsWith("clue scroll ("));
+		if (totalValue >= (lowValueDropTest ? 1L : MVP_DROP_MINIMUM_VALUE))
+		{
+			submitDropStats(items, source, singleItemValueOverride, lowValueDropTest, dropEventId);
+		}
+		else dropDiagnosticJournal.record(dropEventId, "MVP_FILTERED", "below_minimum");
+	}
+
 	private boolean validBingoSource(String source)
 	{
 		return source != null && !source.trim().isEmpty()
@@ -1084,25 +1458,25 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	private void notifyDiscordDrop(String source, Collection<ItemStack> items, String category,
-		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, Integer dropKillCount)
+		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, Integer dropKillCount,
+		String playerName, Map<String, Object> identity, String dropEventId)
 	{
-		if (items.isEmpty() || isTemporaryLootWorld()) return;
+		if (items.isEmpty()) return;
 		long totalValue = 0;
 		for (ItemStack item : items)
 		{
 			long value = effectiveDropValue(item, items.size(), singleItemValueOverride);
 			totalValue += value;
 		}
-		if (config.statsEnabled() && totalValue >= MVP_DROP_MINIMUM_VALUE)
-		{
-			submitDropStats(items, source, singleItemValueOverride);
-		}
+		boolean lowValueDropTest = Boolean.getBoolean(LOW_VALUE_DROP_TEST_PROPERTY)
+			|| (Boolean.getBoolean(LOW_VALUE_CLUE_TEST_PROPERTY)
+				&& source != null && source.toLowerCase(java.util.Locale.ROOT).startsWith("clue scroll ("));
 		if (matchesDiscordFilter(DISCORD_SOURCE_DENYLIST, source))
 		{
 			log.debug("Discord drop skipped for denied source: {}", source);
 			return;
 		}
-		long minimumValue = Math.max(0, config.discordDropMinimumValue());
+		long minimumValue = lowValueDropTest ? 1L : Math.max(0, config.discordDropMinimumValue());
 		if (!config.discordDropsEnabled())
 		{
 			log.debug("Discord drop not requested: sending option disabled; source={}", source);
@@ -1157,18 +1531,18 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		if (notableItems.isEmpty())
 		{
-			log.debug("Discord drop filtered before request: source={}, totalValue={}, minimumValue={}, itemCount={}",
-				source, totalValue, minimumValue, items.size());
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_FILTERED", "before_request");
+			log.debug("Drop {} Discord filtered before request: source={}, totalValue={}, minimumValue={}, itemCount={}",
+				dropEventId, source, totalValue, minimumValue, items.size());
 			return;
 		}
-		String playerName = client.getLocalPlayer() == null ? "Jogador" : client.getLocalPlayer().getName();
 		String sourceName = source == null ? "Loot" : source;
 		String description = String.join("\n", notableItems) + "\n" + discordWikiLink(sourceName, sourceName);
 		final int dropThumbnailItemId = thumbnailItemId;
 		final long dropTotalValue = notifiedValue;
 		final Double dropRarestProbability = rarestProbability;
 		sendDiscordDrop(playerName, description, dropThumbnailItemId, sourceName, category, npcId,
-			dinkItems, dropTotalValue, dropKillCount, dropRarestProbability, screenshot);
+			dinkItems, dropTotalValue, dropKillCount, dropRarestProbability, screenshot, identity, dropEventId);
 	}
 
 	static boolean shouldNotifyDiscordItem(boolean denied, boolean allowed, long value, long minimumValue)
@@ -2390,7 +2764,8 @@ public class ClanMessagesPlugin extends Plugin
 		return "Quest points pendentes";
 	}
 
-	private void submitDropStats(Collection<ItemStack> items, String source, Long singleItemValueOverride)
+	private void submitDropStats(Collection<ItemStack> items, String source, Long singleItemValueOverride,
+		boolean lowValueDropTest, String dropEventId)
 	{
 		if (client.getLocalPlayer() == null) return;
 		Map<Integer, Long> quantitiesByItem = new LinkedHashMap<>();
@@ -2406,62 +2781,60 @@ public class ClanMessagesPlugin extends Plugin
 			long value = singleItemValueOverride != null && quantitiesByItem.size() == 1
 				? Math.max(0L, singleItemValueOverride)
 				: DropItemPricing.unitPrice(itemManager, item.getKey()) * quantity;
-			if (value < MVP_DROP_MINIMUM_VALUE) continue;
+			if (value < (lowValueDropTest ? 1L : MVP_DROP_MINIMUM_VALUE)) continue;
 			Map<String, Object> validDrop = new LinkedHashMap<>();
 			validDrop.put("item", quantity + "x " + itemManager.getItemComposition(item.getKey()).getName());
 			validDrop.put("value", value);
 			validDrops.add(validDrop);
 		}
 		if (validDrops.isEmpty()) return;
+		if (lowValueDropTest)
+		{
+			for (Map<String, Object> drop : validDrops)
+			{
+				long value = (Long) drop.get("value");
+				if (value >= MVP_DROP_MINIMUM_VALUE) continue;
+				String message = "[Live On teste] MVP detectou " + drop.get("item")
+					+ " (" + formatGp(value) + ") de " + source;
+				chatMessageManager.queue(QueuedMessage.builder()
+					.type(ChatMessageType.CONSOLE)
+					.runeLiteFormattedMessage(new ChatMessageBuilder().append(Color.YELLOW, message).build())
+					.build());
+			}
+			validDrops.removeIf(drop -> (Long) drop.get("value") < MVP_DROP_MINIMUM_VALUE);
+			if (validDrops.isEmpty()) return;
+		}
 		// Prepare payload; include playerName so server can verify via WOM
 		java.util.Map<String, Object> dropPayload = new java.util.LinkedHashMap<>();
 		dropPayload.put("playerName", client.getLocalPlayer().getName());
-		dropPayload.put("eventId", UUID.randomUUID().toString());
+		dropPayload.put("eventId", dropEventId);
+		log.debug("Drop {} MVP request prepared: items={}", dropEventId, validDrops.size());
+		dropDiagnosticJournal.record(dropEventId, "MVP_PREPARED", "items=" + validDrops.size());
 		dropPayload.put("drops", validDrops);
 		dropPayload.put("source", source);
 		submitDropPayload(gson.toJson(dropPayload), 0);
 	}
 
-	private void submitDropPayload(String payload, int attempt)
+	private void recoverPendingDrops()
 	{
-		postJson("stats/drops", payload, new okhttp3.Callback()
-		{
-			@Override public void onFailure(okhttp3.Call call, IOException exception)
-			{
-				log.debug("Unable to submit drop statistics (attempt {})", attempt + 1, exception);
-				scheduleDropRetry(payload, attempt);
-			}
-
-			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
-			{
-				try (Response ignored = response)
-				{
-					if (response.isSuccessful())
-					{
-						fetchMvpDrops();
-					}
-					else
-					{
-						log.debug("Drop statistics submission failed: {}", response.code());
-						if (response.code() == 408 || response.code() == 425
-							|| response.code() == 429 || response.code() >= 500)
-						{
-							scheduleDropRetry(payload, attempt);
-						}
-					}
-				}
-			}
-		});
+		String account = authenticatedPlayerName;
+		if (!config.enabled() || account == null || account.isEmpty() || dropDeliveryClient == null) return;
+		dropDeliveryClient.recover(serverBaseUrl(), account,
+			path -> recordDeliveryState(account, path.endsWith("/stats/pbs") ? config.pbRankingEnabled()
+				: path.endsWith("/stats/drops") ? config.statsEnabled() : config.discordDropsEnabled()));
 	}
 
-	private void scheduleDropRetry(String payload, int attempt)
+	private void submitDropPayload(String payload, int attempt)
 	{
-		ScheduledExecutorService currentExecutor = executor;
-		if (currentExecutor == null || currentExecutor.isShutdown()) return;
-		long delaySeconds = Math.min(60L, 1L << Math.min(attempt, 6));
-		currentExecutor.schedule(() -> {
-			if (config.enabled() && config.statsEnabled()) submitDropPayload(payload, Math.min(1000, attempt + 1));
-		}, delaySeconds, TimeUnit.SECONDS);
+		HttpUrl base = serverBaseUrl();
+		DropDeliveryClient delivery = dropDeliveryClient;
+		if (base == null || delivery == null) return;
+		String player = gson.fromJson(payload, com.google.gson.JsonObject.class).get("playerName").getAsString();
+		Request request = new Request.Builder().url(base.newBuilder().addPathSegments("stats/drops").build())
+			.header("X-Live-On-Player", player).header("Authorization", "LiveOnPlayer " + player)
+			.header("X-Live-On-Event", gson.fromJson(payload, com.google.gson.JsonObject.class).get("eventId").getAsString())
+			.post(RequestBody.create(JSON, payload)).build();
+		delivery.send(request, request, "MVP drop", () -> recordDeliveryState(player, config.statsEnabled()));
 	}
 
 	private void sendDetectedDiscordDrop(BingoDrop drop, java.awt.Image screenshot, String idempotencyKey)
@@ -2515,7 +2888,8 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void sendDiscordDrop(String playerName, String description, int thumbnailItemId, String source,
 		String category, Integer npcId, List<Map<String, Object>> items, long totalValue,
-		Integer killCount, Double rarestProbability, java.awt.Image screenshot)
+		Integer killCount, Double rarestProbability, java.awt.Image screenshot, Map<String, Object> identity,
+		String dropEventId)
 	{
 		Map<String, Object> embed = new LinkedHashMap<>();
 		embed.put("title", "Loot Drop");
@@ -2549,11 +2923,9 @@ public class ClanMessagesPlugin extends Plugin
 		// structured fields instead of trying to recover item data from the embed.
 		payload.put("type", "LOOT");
 		payload.put("playerName", playerName);
-		payload.put("idempotencyKey", UUID.randomUUID().toString());
-		payload.put("accountType", String.valueOf(client.getAccountType()));
-		payload.put("seasonalWorld", client.getWorldType().contains(WorldType.SEASONAL));
-		payload.put("dinkAccountHash", liveOnAccountHash(playerName));
-		payload.put("world", client.getWorld());
+		String notificationId = dropEventId;
+		payload.put("idempotencyKey", notificationId);
+		payload.putAll(identity);
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("items", items);
 		extra.put("source", source);
@@ -2565,7 +2937,15 @@ public class ClanMessagesPlugin extends Plugin
 		extra.put("rarestProbability", rarestProbability);
 		extra.put("npcId", npcId);
 		payload.put("extra", extra);
-		Request requestTemplate = discordNotificationRequest(RequestBody.create(JSON, ""));
+		if (RaidLootContext.isRaid(source))
+			log.debug("Raid Discord request prepared: source={}, id={}, items={}, hasFrame={}",
+				source, notificationId, items.size(), screenshot != null);
+		HttpUrl base = serverBaseUrl();
+		Request requestTemplate = base == null ? null : new Request.Builder()
+			.url(base.newBuilder().addPathSegments("notifications/discord").build())
+			.header("X-Live-On-Player", playerName).header("Authorization", "LiveOnPlayer " + playerName)
+			.header("X-Live-On-Event", dropEventId)
+			.post(RequestBody.create(JSON, "")).build();
 		deliverDiscordNotification(requestTemplate, payload, embed, screenshot,
 			DISCORD_LOOT_ATTACHMENT, "Discord drop notification");
 	}
@@ -2575,11 +2955,12 @@ public class ClanMessagesPlugin extends Plugin
 	{
 		if (requestTemplate == null || executor == null || executor.isShutdown())
 		{
+			if (requestTemplate != null && dropDiagnosticJournal != null)
+				dropDiagnosticJournal.record(requestTemplate.header("X-Live-On-Event"), "DISCORD_SKIPPED",
+					"executor_unavailable");
 			log.debug("{} could not start: request or delivery executor unavailable", destination);
 			return;
 		}
-		long generation = connectionSessionGeneration.get();
-		String account = authenticatedPlayerName;
 		executor.execute(() -> {
 			byte[] screenshotBytes = null;
 			if (screenshot instanceof BufferedImage)
@@ -2595,16 +2976,20 @@ public class ClanMessagesPlugin extends Plugin
 			}
 			DropMultipartPayload bodies = DropMultipartPayload.create(
 				gson, payload, embed, screenshotBytes, attachmentName);
+			String eventId = requestTemplate.header("X-Live-On-Event");
+			if (eventId != null) dropDiagnosticJournal.record(eventId, "DISCORD_PREPARED",
+				screenshotBytes == null ? "image=missing" : "image=available bytes=" + screenshotBytes.length);
 			DropDeliveryClient delivery = dropDeliveryClient;
 			if (delivery != null)
 			{
 				log.debug("{} prepared for server request", destination);
 				delivery.send(
-					requestTemplate.newBuilder().post(bodies.initialBody).build(),
-					requestTemplate.newBuilder().post(bodies.retryBody).build(),
+					requestTemplate.newBuilder().header("X-Live-On-Image",
+						screenshotBytes == null ? "absent" : "present").post(bodies.initialBody).build(),
+					requestTemplate.newBuilder().header("X-Live-On-Image", "absent")
+						.post(bodies.retryBody).build(),
 					destination,
-					() -> isCurrentConnectionSession(generation, account)
-						&& config.discordDropsEnabled() && dropParticipationEnabled());
+					() -> recordDeliveryState(requestTemplate.header("X-Live-On-Player"), config.discordDropsEnabled()));
 			}
 			else
 			{
@@ -2691,6 +3076,28 @@ public class ClanMessagesPlugin extends Plugin
 			return String.format(java.util.Locale.ROOT, "%.1fK", value / 1_000.0);
 		}
 		return String.valueOf(value);
+	}
+
+	// Kill count is cosmetic metadata (shown in the notification, never required to send it -
+	// same principle as Dink's LootNotifier/KillCountService). Any exception here must degrade
+	// to "unknown" rather than abort the drop notification that's already in flight; a duplicated
+	// delivery is an acceptable cost, losing one to a metadata lookup failure is not.
+	private Integer safeKillCount(RaidLootContext.Completion completion, String category, String source)
+	{
+		try
+		{
+			return completion == null ? readDropKillCount(category, source) : safeCount(completion.count);
+		}
+		catch (RuntimeException exception)
+		{
+			log.debug("Unable to resolve kill count for {}", source, exception);
+			return null;
+		}
+	}
+
+	private static Integer safeCount(int value)
+	{
+		return value;
 	}
 
 	private Integer readDropKillCount(String category, String source)
@@ -2954,11 +3361,27 @@ public class ClanMessagesPlugin extends Plugin
 			processCombatAchievementBossPb();
 			processBossStatisticsBoardPb();
 		}
-		if (pendingPbTick >= 0 && client.getTickCount() - pendingPbTick > 5)
+		// A boss-first correlation (kill-count chat message already named the boss) is tight:
+		// both messages are chat lines from the same event and should arrive within a few ticks.
+		// A duration-first correlation (pendingPbBoss still null) gets a longer window, because
+		// detectLoot()'s raid-chest rescue below is its only path to a boss name and the chest
+		// can legitimately arrive several real seconds later.
+		int pendingPbMaxTicks = pendingPbBoss != null ? 5 : PENDING_RAID_PB_MAX_TICKS;
+		if (pendingPbTick >= 0 && client.getTickCount() - pendingPbTick > pendingPbMaxTicks)
 		{
+			if (pendingPbBoss == null && pendingPbSeconds > 0)
+			{
+				// A boss-less raid PB expired unresolved: rescuePendingRaidPb() never got a
+				// matching raid-chest event in time. This is the exact failure mode that lost
+				// a real Theatre of Blood PB before PENDING_RAID_PB_MAX_TICKS was widened -
+				// keep a trace so a future recurrence is diagnosable instead of silent.
+				dropDiagnosticJournal.record(UUID.randomUUID().toString(), "PB_EXPIRED",
+					"seconds=" + pendingPbSeconds + " teamSize=" + pendingPbTeamSize);
+			}
 			pendingPbBoss = null;
 			pendingPbSeconds = -1;
 			pendingPbTeamSize = 0;
+			pendingPbMode = null;
 			pendingPbTick = -1;
 		}
 		if (pendingPet && (pendingPetMilestone != null || ++pendingPetTicks > PET_DETAILS_WAIT_TICKS))
@@ -2982,12 +3405,21 @@ public class ClanMessagesPlugin extends Plugin
 		if (config.enabled() && client.getLocalPlayer() != null)
 		{
 			String currentAccount = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
-			if (!currentAccount.equalsIgnoreCase(verifiedAccount))
+			if (!currentAccount.equalsIgnoreCase(verifiedAccount)
+				|| (currentWomCall == null && membershipRecovery.due(System.currentTimeMillis())))
 			{
+				if (!currentAccount.equalsIgnoreCase(verifiedAccount)) membershipRecovery.accountChanged();
+				// Clear the retry deadline synchronously: verifyToken()'s own begin() call only
+				// runs once its clientThread.invokeLater task executes, at least one tick later.
+				// Without this, due() keeps returning true across that gap and this same block
+				// re-triggers verifyToken() on every intervening tick, cancelling and restarting
+				// the WOM request each time instead of letting one attempt resolve.
+				membershipRecovery.begin();
 				verifiedAccount = currentAccount;
 				verifyToken();
 			}
 		}
+		pollRecoveryNotice();
 	}
 
 	private void processBossStatisticsBoardPb()
@@ -3118,7 +3550,7 @@ public class ClanMessagesPlugin extends Plugin
 		String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
 			+ payload.get("mode") + "\n" + seconds;
 		if (!submittedPbSignatures.add(signature)) return;
-		submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds, signature);
+		submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds);
 	}
 
 	static boolean requiresExplicitPbTeamSize(String boss)
@@ -3443,6 +3875,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void clearPendingCaptures()
 	{
+		npcLootEventGate.clear();
 		resetPendingClue();
 		adventureLogOwner = null;
 		adventureLogMenuLoaded = false;
@@ -3453,6 +3886,7 @@ public class ClanMessagesPlugin extends Plugin
 		pendingPbBoss = null;
 		pendingPbSeconds = -1;
 		pendingPbTeamSize = 0;
+		pendingPbMode = null;
 		pendingPbTick = -1;
 	}
 
@@ -3464,9 +3898,10 @@ public class ClanMessagesPlugin extends Plugin
 			String boss = kill.group("boss").trim().replace(":", "");
 			if (pendingPbSeconds > 0 && pendingPbTick >= 0 && client.getTickCount() - pendingPbTick <= 5)
 			{
-				submitCategorizedPb(boss, pendingPbTeamSize, pendingPbSeconds);
+				submitCategorizedPb(boss, pendingPbTeamSize, pendingPbSeconds, pendingPbMode);
 				pendingPbSeconds = -1;
 				pendingPbTeamSize = 0;
+				pendingPbMode = null;
 				pendingPbTick = -1;
 			}
 			else
@@ -3483,17 +3918,22 @@ public class ClanMessagesPlugin extends Plugin
 		int teamSize = (Integer) newPb.get("teamSize");
 		if (newPb.containsKey("boss"))
 		{
-			Map<String, Object> values = pbPayload((String) newPb.get("boss"), toaTeamSize(), seconds);
+			String totalBoss = (String) newPb.get("boss");
+			int totalTeamSize = totalBoss.contains("Theatre of Blood") ? tobTeamSize() : toaTeamSize();
+			Map<String, Object> values = pbPayload(tagModeIfMissing(totalBoss, resolvePendingMode()), totalTeamSize, seconds);
 			submitPb((String) values.get("boss"), (String) values.get("mode"),
-				(Integer) values.get("teamSize"), seconds, "OVERALL", null);
+				(Integer) values.get("teamSize"), seconds, "OVERALL");
 			pendingPbBoss = null;
-			pendingPbSeconds = -1;
-			pendingPbTick = -1;
+			// Deliberately NOT clearing pendingPbSeconds/pendingPbTeamSize/pendingPbMode/
+			// pendingPbTick here: the total-completion message and the room/challenge-time
+			// message (which set those fields moments earlier) are two separate PB categories
+			// ("Overall" and "Rooms"), not the same value twice. Wiping the pending room time
+			// here used to discard it before the raid chest ever got a chance to submit it.
 			return;
 		}
 		if (pendingPbBoss != null && pendingPbTick >= 0 && client.getTickCount() - pendingPbTick <= 5)
 		{
-			submitCategorizedPb(pendingPbBoss, teamSize, seconds);
+			submitCategorizedPb(pendingPbBoss, teamSize, seconds, (String) newPb.get("mode"));
 			pendingPbBoss = null;
 			pendingPbTick = -1;
 		}
@@ -3501,6 +3941,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			pendingPbSeconds = seconds;
 			pendingPbTeamSize = teamSize;
+			pendingPbMode = (String) newPb.get("mode");
 			pendingPbTick = client.getTickCount();
 		}
 	}
@@ -3510,11 +3951,13 @@ public class ClanMessagesPlugin extends Plugin
 		if (message == null) return null;
 		message = Text.removeTags(message).replace('\u00a0', ' ').trim();
 		Matcher total = PB_RAID_TOTAL_PATTERN.matcher(message);
-		if (total.find())
+		Matcher tobTotal = PB_TOB_TOTAL_PATTERN.matcher(message);
+		Matcher matchedTotal = total.find() ? total : (tobTotal.find() ? tobTotal : null);
+		if (matchedTotal != null)
 		{
 			Map<String, Object> result = new LinkedHashMap<>();
-			result.put("boss", total.group("boss"));
-			result.put("seconds", parsePbTime(total.group("pb")));
+			result.put("boss", matchedTotal.group("boss"));
+			result.put("seconds", parsePbTime(matchedTotal.group("pb")));
 			result.put("teamSize", 0);
 			return result;
 		}
@@ -3526,7 +3969,32 @@ public class ClanMessagesPlugin extends Plugin
 		Map<String, Object> result = new LinkedHashMap<>();
 		result.put("seconds", parsePbTime(matched.group("pb")));
 		result.put("teamSize", raidMatch ? parseTeamSize(matched.group("teamsize")) : 0);
+		Matcher mode = PB_MODE_PATTERN.matcher(message);
+		if (mode.find()) result.put("mode", mode.group("mode"));
 		return result;
+	}
+
+	static Map<String, Object> parseClanPbAnnouncement(String message, String playerName)
+	{
+		if (message == null || playerName == null || playerName.trim().isEmpty()) return null;
+		Matcher announcement = CLAN_PB_ANNOUNCEMENT_PATTERN.matcher(
+			Text.removeTags(message).replace('\u00A0', ' ').trim());
+		if (!announcement.matches()
+			|| !WomMembership.normalizePlayerName(announcement.group("player"))
+				.equalsIgnoreCase(WomMembership.normalizePlayerName(playerName))) return null;
+		String activity = announcement.group("activity").trim();
+		Matcher team = CLAN_PB_TEAM_SIZE_PATTERN.matcher(activity);
+		boolean hasTeamSize = team.find();
+		int teamSize = hasTeamSize ? parseTeamSize(team.group("size")) : 0;
+		if (teamSize > 24) return null;
+		if (hasTeamSize) activity = team.replaceFirst("").trim();
+		double seconds;
+		try { seconds = parsePbTime(announcement.group("pb")); }
+		catch (NumberFormatException exception) { return null; }
+		if (activity.isEmpty() || seconds <= 0 || seconds > 86400) return null;
+		Map<String, Object> payload = pbPayload(activity, teamSize, seconds);
+		if (!hasTeamSize && requiresExplicitPbTeamSize((String) payload.get("boss"))) return null;
+		return payload;
 	}
 
 	private void processAdventureLog()
@@ -3689,16 +4157,70 @@ public class ClanMessagesPlugin extends Plugin
 		records.put(key, record);
 	}
 
+	// Chambers of Xeric's "Team size: ... Duration: ... (new personal best)" broadcast never
+	// names the raid, and CoX sends no correlating kill-count chat message either - so that PB
+	// would otherwise sit as pendingPbSeconds with no boss until it expires unresolved. The
+	// reward chest that follows is an unambiguous, independent source for "which raid", so use
+	// it as a second chance rather than let the PB be lost to a missing chat message.
+	private void rescuePendingRaidPb(String eventSource)
+	{
+		if (pendingPbBoss != null || pendingPbSeconds <= 0 || pendingPbTick < 0
+			|| client.getTickCount() - pendingPbTick > PENDING_RAID_PB_MAX_TICKS) return;
+		double seconds = pendingPbSeconds;
+		int teamSize = pendingPbTeamSize;
+		String mode = pendingPbMode;
+		pendingPbSeconds = -1;
+		pendingPbTeamSize = 0;
+		pendingPbMode = null;
+		pendingPbTick = -1;
+		submitCategorizedPb(eventSource, teamSize, seconds, mode);
+	}
+
 	private void submitCategorizedPb(String recordedBoss, int teamSize, double seconds)
+	{
+		submitCategorizedPb(recordedBoss, teamSize, seconds, null);
+	}
+
+	private void submitCategorizedPb(String recordedBoss, int teamSize, double seconds, String mode)
+	{
+		submitCategorizedPb(recordedBoss, teamSize, seconds, mode, roomTimeType(recordedBoss));
+	}
+
+	// Theatre of Blood and Tombs of Amascut also submit a separate "Overall" PB (the total-
+	// completion chat line, handled directly in capturePersonalBest); tag the room/challenge-
+	// time counterpart so the two don't collide as the same category. Chambers of Xeric has no
+	// such split - it only ever sends this one message - so it keeps "". Shared by both the
+	// raid-chest rescue path and the clan-announcement path, since either can be the one that
+	// actually reaches the server first for a given raid's room-time PB.
+	private static String tagModeIfMissing(String recordedBoss, String mode)
+	{
+		return mode == null || recordedBoss == null
+			|| recordedBoss.toLowerCase(java.util.Locale.ROOT).contains(mode.toLowerCase(java.util.Locale.ROOT))
+			? recordedBoss : recordedBoss + " " + mode;
+	}
+
+	private static String roomTimeType(String recordedBoss)
+	{
+		return recordedBoss != null
+			&& (recordedBoss.contains("Theatre of Blood") || recordedBoss.contains("Tombs of Amascut"))
+			? "ROOM" : "";
+	}
+
+	// mode comes from a separate message than recordedBoss for Theatre of Blood (its total/
+	// challenge time lines never repeat the "(Entry Mode)"/"(Hard Mode)" the wave-complete line
+	// carries), so it can't be baked into recordedBoss the way ToA's total-completion text
+	// already includes it. Appending it here lets pbPayload()'s own mode detection pick it up
+	// instead of silently defaulting to Normal.
+	private void submitCategorizedPb(String recordedBoss, int teamSize, double seconds, String mode, String timeType)
 	{
 		if (teamSize <= 0 && recordedBoss != null)
 		{
 			if (recordedBoss.contains("Tombs of Amascut")) teamSize = toaTeamSize();
 			else if (recordedBoss.contains("Theatre of Blood")) teamSize = tobTeamSize();
 		}
-		Map<String, Object> values = pbPayload(recordedBoss, teamSize, seconds);
+		Map<String, Object> values = pbPayload(tagModeIfMissing(recordedBoss, mode), teamSize, seconds);
 		submitPb((String) values.get("boss"), (String) values.get("mode"),
-			(Integer) values.get("teamSize"), seconds);
+			(Integer) values.get("teamSize"), seconds, timeType);
 	}
 
 	private int tobTeamSize()
@@ -4413,6 +4935,27 @@ public class ClanMessagesPlugin extends Plugin
 		};
 	}
 
+	private DropSessionGate.State dropSessionState(long generation, String account)
+	{
+		if (config.enabled() && (config.discordDropsEnabled() || config.statsEnabled())
+			&& generation == connectionSessionGeneration.get() && account != null && !account.isEmpty()
+			&& (authenticatedPlayerName == null || authenticatedPlayerName.isEmpty())
+			&& !membershipRecovery.rejected() && !isTemporaryLootWorld()
+			&& account.equalsIgnoreCase(verifiedAccount)) return DropSessionGate.State.WAIT;
+		DropSessionGate.State state = DropSessionGate.evaluate(generation, connectionSessionGeneration.get(),
+			account, authenticatedPlayerName, config.enabled() && (config.discordDropsEnabled() || config.statsEnabled()),
+			client.getGameState());
+		if (state != DropSessionGate.State.READY) return state;
+		if (isTemporaryLootWorld()) return DropSessionGate.State.CANCEL;
+		if (client.getLocalPlayer() == null) return DropSessionGate.State.WAIT;
+		return dropParticipationEnabled() ? DropSessionGate.State.READY : DropSessionGate.State.CANCEL;
+	}
+
+	private void runWhenDropSessionReady(long generation, String account, Runnable action)
+	{
+		clientThread.invokeLater(DropSessionGate.task(() -> dropSessionState(generation, account), action));
+	}
+
 	private boolean isCurrentConnectionSession(long generation, String account)
 	{
 		return generation == connectionSessionGeneration.get()
@@ -4707,55 +5250,41 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void submitPb(String boss, String mode, int teamSize, double seconds)
 	{
-		submitPb(boss, mode, teamSize, seconds, "", null);
+		submitPb(boss, mode, teamSize, seconds, "");
 	}
 
-	private void submitPb(String boss, String mode, int teamSize, double seconds, String combatAchievementSignature)
-	{
-		submitPb(boss, mode, teamSize, seconds, "", combatAchievementSignature);
-	}
-
-	private void submitPb(String boss, String mode, int teamSize, double seconds, String timeType,
-		String combatAchievementSignature)
+	private void submitPb(String boss, String mode, int teamSize, double seconds, String timeType)
 	{
 		if (!isPbParticipationEnabled() || !PbCategory.isAllowed(boss, mode) || boss.trim().isEmpty()
-			|| authenticatedPlayerName == null
-			|| authenticatedPlayerName.isEmpty() || seconds <= 0) return;
+			|| !canCaptureOwnRecord(config.pbRankingEnabled()) || !Double.isFinite(seconds) || seconds <= 0) return;
+		String account = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
+		HttpUrl base = serverBaseUrl();
+		if (base == null || dropDeliveryClient == null) return;
 		java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
-		payload.put("playerName", authenticatedPlayerName);
+		payload.put("playerName", account);
 		payload.put("boss", boss.trim());
 		payload.put("mode", mode == null ? "" : mode.trim());
 		payload.put("teamSize", Math.max(0, teamSize));
 		payload.put("timeType", timeType == null ? "" : timeType.trim());
 		payload.put("seconds", seconds);
-		postJson("stats/pbs", gson.toJson(payload), new okhttp3.Callback()
-		{
-			@Override public void onFailure(okhttp3.Call call, IOException exception)
-			{
-				log.debug("Unable to submit PB", exception);
-				clearFailedCombatAchievementPb(combatAchievementSignature);
-			}
-			@Override public void onResponse(okhttp3.Call call, Response response)
-			{
-				try (Response ignored = response)
-				{
-					if (response.isSuccessful())
-					{
-						fetchPbCategories();
-					}
-					else
-					{
-						log.debug("PB submission failed with HTTP {}", response.code());
-						clearFailedCombatAchievementPb(combatAchievementSignature);
-					}
-				}
-			}
-		});
+		String json = gson.toJson(payload);
+		if (!queuedPbSignatures.add(pbDedupSignature(account, boss, mode, teamSize, seconds))) return;
+		Request request = new Request.Builder().url(base.newBuilder().addPathSegments("stats/pbs").build())
+			.header("X-Live-On-Player", account).header("Authorization", "LiveOnPlayer " + account)
+			.header("X-Live-On-Event", UUID.randomUUID().toString())
+			.post(RequestBody.create(JSON, json)).build();
+		// The server keeps the best time for each category, so replaying an acknowledged PB is harmless.
+		dropDeliveryClient.send(request, request, "PB", () -> recordDeliveryState(account, config.pbRankingEnabled()));
 	}
 
-	private void clearFailedCombatAchievementPb(String signature)
+	// The in-game completion message and the clan-wide announcement of the same PB can carry
+	// different timeType labels (e.g. "OVERALL" vs ""). Dedup on the identity of the record
+	// (account/boss/mode/team/time), not the full payload, so both sources of the same PB never
+	// produce two requests.
+	static String pbDedupSignature(String account, String boss, String mode, int teamSize, double seconds)
 	{
-		if (signature != null) submittedPbSignatures.remove(signature);
+		return account + '\n' + boss.trim() + '\n' + (mode == null ? "" : mode.trim())
+			+ '\n' + Math.max(0, teamSize) + '\n' + seconds;
 	}
 
 	private boolean isPbParticipationEnabled()
@@ -5036,6 +5565,16 @@ public class ClanMessagesPlugin extends Plugin
 		else if (event.getGameState() == GameState.LOGGED_IN && config.enabled())
 		{
 			configurePolling();
+			if (Boolean.getBoolean(LOW_VALUE_DROP_TEST_PROPERTY) && !lowValueTestNoticeShown)
+			{
+				lowValueTestNoticeShown = true;
+				chatMessageManager.queue(QueuedMessage.builder()
+					.type(ChatMessageType.CONSOLE)
+					.runeLiteFormattedMessage(new ChatMessageBuilder()
+						.append(Color.YELLOW, "[Live On teste] Limite de 1 GP ativo para drops no Discord; MVP abaixo de 1M aparece só aqui.")
+						.build())
+					.build());
+			}
 		}
 	}
 
@@ -5538,6 +6077,8 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			}
 			final String rsn = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
 			verifiedAccount = rsn;
+			membershipRecovery.begin();
+			final long verificationGeneration = connectionSessionGeneration.get();
 			final String key = rsn.toLowerCase(java.util.Locale.ROOT);
 			final long now = System.currentTimeMillis();
 			// Check cache first
@@ -5548,6 +6089,7 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			if (cached != null && cached.expiresAtMillis > now)
 			{
 				boolean member = cached.member;
+				membershipRecovery.resolved(member, cached.expiresAtMillis);
 				String roleName = cached.role;
 				if (member)
 				{
@@ -5564,6 +6106,7 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 					canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
 					switchMessageCursorAccount(rsn);
 					authenticatedPlayerName = rsn;
+					recoverPendingDrops();
 					configurePolling();
 					rankRequestStatusKnown = false;
 					rankRequestPending = false;
@@ -5613,90 +6156,55 @@ private static void appendChatText(ChatMessageBuilder builder, Color color, Stri
 			currentWomCall = call;
 			call.enqueue(new okhttp3.Callback()
 			{
-				@Override public void onFailure(okhttp3.Call call, IOException exception)
+				@Override public void onFailure(okhttp3.Call failed, IOException exception)
 				{
-					if (call.isCanceled())
-					{
-						return;
-					}
-					if (currentWomCall != call)
-					{
-						return;
-					}
-					log.debug("WOM membership check failed", exception);
-					if (panel != null) panel.setAuthenticated(false, false);
-					if (panel != null) { panel.setStatus("Falha ao verificar grupo (WOM)"); panel.setAccessMessage("Falha ao verificar grupo (WOM)"); panel.startVerifyCooldown(VERIFY_COOLDOWN_SECONDS); }
-					authenticatedPlayerName = "";
-					isStaff = false;
-					if (currentWomCall == call) currentWomCall = null;
+					complete(null, exception);
 				}
 
-				@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+				@Override public void onResponse(okhttp3.Call completed, Response response)
 				{
-					try (Response resp = response)
+					try (Response ignored = response)
 					{
-							// Ignore a response superseded by another verification.
-							if (currentWomCall != call)
-							{
-								return;
-							}
-							if (!resp.isSuccessful() || resp.body() == null)
-							{
-								log.debug("WOM membership check returned HTTP {}", resp.code());
-								if (panel != null) panel.setAuthenticated(false, false);
-								if (panel != null) { panel.setStatus("Falha ao consultar o WOM (erro " + resp.code() + ")"); panel.setAccessMessage("Não foi possível validar sua conta no Wise Old Man."); panel.startVerifyCooldown(VERIFY_COOLDOWN_SECONDS); }
-								authenticatedPlayerName = "";
-								isStaff = false;
-								if (currentWomCall == call) currentWomCall = null;
-								return;
-							}
-							WomMembership.Result womMembership = WomMembership.parse(gson, resp.body().string());
-							boolean member = womMembership.member;
-							String roleName = womMembership.role;
-							// store result in cache
-							long ttlSeconds = member ? WOM_CACHE_TTL_SECONDS : WOM_NEGATIVE_CACHE_TTL_SECONDS;
-							long expires = System.currentTimeMillis() + (ttlSeconds * 1000L);
-							womCache.put(key, new CacheEntry(member, roleName, expires));
-							if (member)
-							{
-								boolean staff = WomMembership.isStaffRole(roleName);
-								if (roleName != null)
-								{
-									String norm = roleName.replaceAll("[^A-Za-z0-9]","" ).toUpperCase(java.util.Locale.ROOT);
-									java.util.Set<String> allowed = new java.util.HashSet<>();
-									allowed.add("OWNER"); allowed.add("DEPUTYOWNER"); allowed.add("MODERATOR"); allowed.add("ADMINISTRATOR");
-									if (allowed.contains(norm)) staff = true;
-								}
-								isStaff = staff;
-								isDeputyOwner = isDeputyOwnerRole(roleName);
-								canPublishBroadcast = WomMembership.canPublishBroadcast(roleName);
-								switchMessageCursorAccount(rsn);
-							authenticatedPlayerName = rsn;
-								configurePolling();
-								rankRequestStatusKnown = false;
-								rankRequestPending = false;
-								fetchRankRequestStatus();
-								if (panel != null) { panel.setAccessMessage(""); panel.clearRanksStatus(); panel.setAuthenticated(true, staff); panel.setDeputyOwner(isDeputyOwner); panel.setBroadcastAllowed(canPublishBroadcast); panel.setAuthenticatedPlayer(rsn); }
-								fetchPbCategories();
-								if (staff && hasStaffAccessKey())
-								{
-									fetchRankRequests();
-									fetchSentMessages();
-								}
-							}
-							else
-							{
-								authenticatedPlayerName = "";
-								isStaff = false;
-								isDeputyOwner = false;
-								canPublishBroadcast = false;
-								if (panel != null) panel.setAuthenticated(false, false);
-								if (panel != null) { panel.setStatus("Não é membro do clã (WOM)"); panel.setAccessMessage("Membro não identificado. Este plugin é exclusivo para membros do Live On."); }
-							}
-							// start cooldown so user cannot spam immediately
-							if (panel != null) panel.startVerifyCooldown(VERIFY_COOLDOWN_SECONDS);
-							if (currentWomCall == call) currentWomCall = null;
+						if (!response.isSuccessful() || response.body() == null)
+							throw new IOException("WOM HTTP " + response.code());
+						String body = response.body().string();
+						if (body.trim().isEmpty() || "null".equals(body.trim()))
+							throw new IOException("Empty WOM membership response");
+						complete(WomMembership.parse(gson, body), null);
 					}
+					catch (IOException | RuntimeException exception) { complete(null, exception); }
+				}
+
+				private void complete(WomMembership.Result result, Exception failure)
+				{
+					clientThread.invokeLater(() -> {
+						if (currentWomCall != call || call.isCanceled()) return;
+						currentWomCall = null;
+						if (!config.enabled() || verificationGeneration != connectionSessionGeneration.get()
+							|| client.getLocalPlayer() == null || !rsn.equalsIgnoreCase(
+								WomMembership.normalizePlayerName(client.getLocalPlayer().getName())))
+						{
+							membershipRecovery.stale(System.currentTimeMillis());
+							return;
+						}
+						if (failure != null)
+						{
+							log.debug("WOM unavailable; retaining pending drops and retrying verification", failure);
+							authenticatedPlayerName = "";
+							isStaff = false;
+							membershipRecovery.failed(System.currentTimeMillis());
+							if (panel != null) {
+								panel.setAuthenticated(false, false);
+								panel.setAccessMessage("Verificação temporariamente indisponível. Tentando novamente...");
+								panel.startVerifyCooldown(VERIFY_COOLDOWN_SECONDS);
+							}
+							return;
+						}
+						long ttl = result.member ? WOM_CACHE_TTL_SECONDS : WOM_NEGATIVE_CACHE_TTL_SECONDS;
+						womCache.put(key, new CacheEntry(result.member, result.role,
+							System.currentTimeMillis() + ttl * 1000L));
+						verifyToken();
+					});
 				}
 			});
 		});
