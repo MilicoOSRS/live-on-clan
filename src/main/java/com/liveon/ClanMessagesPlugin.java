@@ -4642,6 +4642,7 @@ public class ClanMessagesPlugin extends Plugin
 						targetPanel.setMvpDrops(ranking == null
 							? java.util.Collections.emptyList()
 							: java.util.Arrays.asList(ranking), result == null ? null : result.own);
+						targetPanel.setMvpMonthTotal(result == null ? 0 : result.monthTotal);
 					}
 				}
 			}

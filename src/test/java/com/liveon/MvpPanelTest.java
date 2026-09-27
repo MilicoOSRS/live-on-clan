@@ -126,4 +126,13 @@ public class MvpPanelTest
 		Assert.assertTrue(panel.isEfficiencyExpanded("Skill Player", "EHP"));
 		SwingUtilities.invokeAndWait(() -> { });
 	}
+
+	@Test
+	public void monthTotalLineIsHiddenUntilServerSendsTotal()
+	{
+		org.junit.Assert.assertNull(MvpPanel.monthTotalText(0));
+		org.junit.Assert.assertEquals(
+			"<html>Total do clan no mês: <font color='#a6e22e'>12.40B</font></html>",
+			MvpPanel.monthTotalText(12_400_000_000L));
+	}
 }

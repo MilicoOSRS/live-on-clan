@@ -56,6 +56,8 @@ final class MvpPanel extends JPanel
 	private static final Color DROP_GROUP_LIGHT = new Color(44, 44, 44);
 	private static final Color PANEL_BACKGROUND = new Color(36, 36, 36);
 	private static final Color NOTICE_BLUE = new Color(90, 190, 245);
+	/** Rows shown per MVP ranking; older servers send ten and the panel shows what it gets. */
+	static final int TOP_SIZE = 25;
 	private static final Font META_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 11);
 	private static final Font SECTION_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 11);
 	private static final Font POSITION_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 12);
@@ -63,6 +65,7 @@ final class MvpPanel extends JPanel
 	private static final Icon HARDCORE_IRONMAN_ICON = officialIronIcon("hardcore_ironman.png");
 	private static final Icon ULTIMATE_IRONMAN_ICON = officialIronIcon("ultimate_ironman.png");
 	private final JPanel dropEntries = new WidthTrackingPanel();
+	private final JLabel monthTotalLabel = new JLabel();
 	private final JPanel ehbEntries = new WidthTrackingPanel();
 	private final JPanel ehpEntries = new WidthTrackingPanel();
 	private final JPanel dropOwnPosition = new JPanel();
@@ -90,8 +93,8 @@ final class MvpPanel extends JPanel
 		setLayout(new BorderLayout());
 		JTabbedPane sections = new JTabbedPane();
 		sections.addTab("Drops", createDropsSection());
-		sections.addTab("EHB", createEfficiencySection("TOP 10 • MVP EHB", ehbEntries, ehbOwnPosition));
-		sections.addTab("EHP", createEfficiencySection("TOP 10 • MVP EHP", ehpEntries, ehpOwnPosition));
+		sections.addTab("EHB", createEfficiencySection("TOP " + TOP_SIZE + " • MVP EHB", ehbEntries, ehbOwnPosition));
+		sections.addTab("EHP", createEfficiencySection("TOP " + TOP_SIZE + " • MVP EHP", ehpEntries, ehpOwnPosition));
 		configureSectionTabs(sections, dropIcon);
 		add(sections, BorderLayout.CENTER);
 		updateDropRanking(Collections.emptyList(), null);
@@ -213,7 +216,7 @@ final class MvpPanel extends JPanel
 		});
 	}
 
-	private static JPanel createDropsHeader()
+	private JPanel createDropsHeader()
 	{
 		GradientPanel header = new GradientPanel(new Color(47, 44, 34), PANEL_BACKGROUND);
 		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
@@ -229,6 +232,12 @@ final class MvpPanel extends JPanel
 		header.add(kicker);
 		header.add(Box.createVerticalStrut(3));
 		header.add(meta);
+		monthTotalLabel.setForeground(new Color(195, 195, 195));
+		monthTotalLabel.setFont(META_FONT);
+		monthTotalLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		monthTotalLabel.setVisible(false);
+		header.add(Box.createVerticalStrut(2));
+		header.add(monthTotalLabel);
 		return header;
 	}
 
@@ -286,6 +295,23 @@ final class MvpPanel extends JPanel
 		return name.substring(0, 1).toUpperCase(new Locale("pt", "BR")) + name.substring(1) + " de " + month.getYear();
 	}
 
+	void setMonthTotal(long total)
+	{
+		String text = monthTotalText(total);
+		SwingUtilities.invokeLater(() ->
+		{
+			monthTotalLabel.setText(text == null ? "" : text);
+			monthTotalLabel.setVisible(text != null);
+		});
+	}
+
+	/** Older servers do not send the clan total; the line stays hidden instead of showing zero. */
+	static String monthTotalText(long total)
+	{
+		if (total <= 0) return null;
+		return "<html>Total do clan no mês: <font color='#a6e22e'>" + formatValue(total) + "</font></html>";
+	}
+
 	synchronized void updateDropRanking(List<MvpDropEntry> ranking, MvpDropEntry own)
 	{
 		List<MvpDropEntry> updatedRanking = ranking == null
@@ -309,7 +335,7 @@ final class MvpPanel extends JPanel
 	{
 		List<MvpDropEntry> topTen = ranking == null
 			? Collections.emptyList()
-			: ranking.subList(0, Math.min(10, ranking.size()));
+			: ranking.subList(0, Math.min(TOP_SIZE, ranking.size()));
 		SwingUtilities.invokeLater(() ->
 		{
 			dropEntries.removeAll();
@@ -380,7 +406,7 @@ final class MvpPanel extends JPanel
 	{
 		List<MvpEfficiencyEntry> topTen = ranking == null
 			? Collections.emptyList()
-			: ranking.subList(0, Math.min(10, ranking.size()));
+			: ranking.subList(0, Math.min(TOP_SIZE, ranking.size()));
 		SwingUtilities.invokeLater(() ->
 		{
 			target.removeAll();

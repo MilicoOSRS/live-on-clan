@@ -1157,6 +1157,7 @@ final class ClanMessagesPanel extends PluginPanel
 	{
 		mvpTab.updateDropRanking(ranking, own);
 	}
+	void setMvpMonthTotal(long total) { mvpTab.setMonthTotal(total); }
 	void setMvpParticipationEnabled(boolean enabled) { mvpTab.setParticipationEnabled(enabled); }
 	void updatePbCategories(java.util.List<PbCategory> categories) { pbTab.updateCategories(categories); }
 	void beginPbRankingRequest(long generation) { pbTab.beginRankingRequest(generation); }
