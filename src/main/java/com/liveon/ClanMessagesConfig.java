@@ -84,6 +84,17 @@ public interface ClanMessagesConfig extends Config
 		return false;
 	}
 
+	@ConfigItem(
+		keyName = "hidePrivateMessagesInScreenshots",
+		name = "Esconder PMs nos prints",
+		description = "Esconde as mensagens privadas (modo split) nos prints enviados ao Discord",
+		hidden = true
+	)
+	default boolean hidePrivateMessagesInScreenshots()
+	{
+		return true;
+	}
+
 	@Range(min = -20, max = 20)
 	@ConfigItem(
 		keyName = "sidebarIconPriority",
@@ -129,14 +140,16 @@ public interface ClanMessagesConfig extends Config
 		return "https://liveonpl.discloud.app/";
 	}
 
+	// RuneLite stores hidden defaults in every profile, so the old "pollIntervalSeconds" key
+	// keeps 30 for existing users. A new key makes the 15 second interval reach everyone.
 	@ConfigItem(
-		keyName = "pollIntervalSeconds",
+		keyName = "messagePollSeconds",
 		name = "Intervalo de atualizacao",
 		description = "Frequencia de consulta de novas mensagens",
 		hidden = true
 	)
-	default int pollIntervalSeconds()
+	default int messagePollSeconds()
 	{
-		return 30;
+		return 15;
 	}
 }

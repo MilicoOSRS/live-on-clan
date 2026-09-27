@@ -283,6 +283,8 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private static final int RANK_NOTICE_DELAY_SECONDS = 10;
+	private static final int PRIVATE_CHAT_RESTORE_SECONDS = 3;
+	private final AtomicBoolean privateChatHidden = new AtomicBoolean();
 	/** Highest rank index already announced per account in this session. */
 	private final Map<String, Integer> notifiedRankIndexes = new java.util.concurrent.ConcurrentHashMap<>();
 	/** Highest rank seen while waiting for the account data to settle, per account. */
@@ -427,7 +429,7 @@ public class ClanMessagesPlugin extends Plugin
 		dropDeliveryClient.setOutbox(new DropOutbox(
 			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/pending-drops"), gson));
 		dropFrameCapture = new DropFrameCapture(executor,
-			action -> clientThread.invokeLater(action), drawManager::requestNextFrameListener);
+			action -> clientThread.invokeLater(action), this::requestScreenshotFrame);
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		eventOverlay = new ClanEventOverlay(this);
@@ -469,6 +471,7 @@ public class ClanMessagesPlugin extends Plugin
 			dropDeliveryClient.close();
 			dropDeliveryClient = null;
 		}
+		restorePrivateChat();
 		if (dropFrameCapture != null)
 		{
 			dropFrameCapture.close();
@@ -1290,6 +1293,34 @@ public class ClanMessagesPlugin extends Plugin
 	static boolean usesNpcTrackerFallback(LootRecordType type, String name)
 	{
 		return type == LootRecordType.NPC && !isSpecialLootNpc(name);
+	}
+
+	/** Next frame for a Discord screenshot, with the split private chat hidden for it (as Dink does). */
+	private void requestScreenshotFrame(java.util.function.Consumer<java.awt.Image> listener)
+	{
+		clientThread.invokeLater(() -> {
+			Widget privateChat = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (config.hidePrivateMessagesInScreenshots() && privateChat != null && !privateChat.isHidden()
+				&& privateChatHidden.compareAndSet(false, true))
+			{
+				privateChat.setHidden(true);
+				executor.schedule(this::restorePrivateChat, PRIVATE_CHAT_RESTORE_SECONDS, TimeUnit.SECONDS);
+			}
+			drawManager.requestNextFrameListener(image -> {
+				restorePrivateChat();
+				listener.accept(image);
+			});
+		});
+	}
+
+	/** Always shows the private chat again: after the frame, after a timeout, or on shutdown. */
+	private void restorePrivateChat()
+	{
+		if (!privateChatHidden.getAndSet(false)) return;
+		clientThread.invokeLater(() -> {
+			Widget privateChat = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (privateChat != null) privateChat.setHidden(false);
+		});
 	}
 
 	/** Items only one loot notification listed are usually crushed bones or ashes; keep only MVP-worthy ones. */
@@ -3448,7 +3479,7 @@ public class ClanMessagesPlugin extends Plugin
 			Boolean previouslyOwned = pendingPetPreviouslyOwned == null ? Boolean.TRUE : pendingPetPreviouslyOwned;
 			resetPendingPet();
 			if (config.discordDropsEnabled())
-				drawManager.requestNextFrameListener(image -> sendPetNotification(playerName, petName, milestone,
+				requestScreenshotFrame(image -> sendPetNotification(playerName, petName, milestone,
 					gameMessage, duplicate, backpack, previouslyOwned, image));
 		}
 		if (clanLiveBadgeDecorator != null)
@@ -4447,7 +4478,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			return;
 		}
-		long interval = Math.max(5, config.pollIntervalSeconds());
+		long interval = Math.max(5, config.messagePollSeconds());
 		pollingTask = executor.scheduleAtFixedRate(this::fetchMessages, 0, interval, TimeUnit.SECONDS);
 		mvpDropsPollingTask = executor.scheduleAtFixedRate(this::fetchMvpRankings, 2, 60, TimeUnit.SECONDS);
 		if (isStaff && hasStaffAccessKey())
