@@ -80,7 +80,6 @@ import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.Notifier;
 import net.runelite.client.util.LinkBrowser;
 import net.runelite.client.util.Text;
 import okhttp3.HttpUrl;
@@ -244,7 +243,6 @@ public class ClanMessagesPlugin extends Plugin
 	@Inject private Gson gson;
 	@Inject private ClanMessagesConfig config;
 	@Inject private ConfigManager configManager;
-	@Inject private Notifier notifier;
 	@Inject private OverlayManager overlayManager;
 
 	private ScheduledExecutorService executor;
@@ -284,7 +282,11 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Set<String> locallyDisplayedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
-	private final java.util.Set<String> sessionRankNotifications = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private static final int RANK_NOTICE_DELAY_SECONDS = 10;
+	/** Highest rank index already announced per account in this session. */
+	private final Map<String, Integer> notifiedRankIndexes = new java.util.concurrent.ConcurrentHashMap<>();
+	/** Highest rank seen while waiting for the account data to settle, per account. */
+	private final Map<String, String> pendingRankNotices = new java.util.concurrent.ConcurrentHashMap<>();
 	private volatile boolean isStaff = false;
 	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
@@ -2120,11 +2122,30 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 
-		String sessionKey = accountKey + "|" + eligibleRank.toLowerCase(java.util.Locale.ROOT);
+		Integer notifiedIndex = notifiedRankIndexes.get(accountKey);
 		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex,
-			sessionRankNotifications.contains(sessionKey), rankRequestStatusKnown && rankRequestPending)) return;
-		sessionRankNotifications.add(sessionKey);
-		String message = rankNotificationMessage(eligibleRank);
+			notifiedIndex == null ? -1 : notifiedIndex, rankRequestStatusKnown && rankRequestPending)) return;
+		// Account data arrives in parts after login; wait and announce only the highest rank.
+		String pending = pendingRankNotices.get(accountKey);
+		if (pending != null)
+		{
+			if (eligibleIndex > regularRankIndex(pending)) pendingRankNotices.put(accountKey, eligibleRank);
+			return;
+		}
+		pendingRankNotices.put(accountKey, eligibleRank);
+		executor.schedule(() -> clientThread.invokeLater(() -> announcePendingRank(accountKey, currentIndex)),
+			RANK_NOTICE_DELAY_SECONDS, TimeUnit.SECONDS);
+	}
+
+	private void announcePendingRank(String accountKey, int currentIndex)
+	{
+		String eligibleRank = pendingRankNotices.remove(accountKey);
+		if (eligibleRank == null || !config.enabled()) return;
+		int eligibleIndex = regularRankIndex(eligibleRank);
+		Integer notifiedIndex = notifiedRankIndexes.get(accountKey);
+		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex,
+			notifiedIndex == null ? -1 : notifiedIndex, rankRequestStatusKnown && rankRequestPending)) return;
+		notifiedRankIndexes.put(accountKey, eligibleIndex);
 		ChatMessageBuilder builder = new ChatMessageBuilder()
 			.append(Color.GREEN, "[Live On] ")
 			.append(Color.WHITE, "Promoção de rank disponível: ");
@@ -2134,19 +2155,14 @@ public class ClanMessagesPlugin extends Plugin
 			.type(ChatMessageType.CONSOLE)
 			.runeLiteFormattedMessage(builder.build())
 			.build());
-		notifier.notify(message);
-	}
-
-	static String rankNotificationMessage(String rank)
-	{
-		return "[Live On] Promoção de rank disponível: " + rank + "! Solicite pelo plugin do clã.";
 	}
 
 	static boolean shouldNotifyAvailableRank(int currentIndex, int eligibleIndex,
-		boolean notifiedThisSession, boolean requestPending)
+		int notifiedIndex, boolean requestPending)
 	{
 		if (requestPending || currentIndex < 0 || eligibleIndex <= currentIndex) return false;
-		return !notifiedThisSession;
+		// Never announce a rank equal to or below one already announced this session.
+		return eligibleIndex > notifiedIndex;
 	}
 
 	private Icon clanRankIconFor(String displayRank)
