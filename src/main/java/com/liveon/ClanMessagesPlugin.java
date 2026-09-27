@@ -943,9 +943,20 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		log.debug("NPC loot event: source={}, items={}", event.getNpc().getName(), event.getItems().size());
 		if (!usesNpcLootReceived(event.getNpc().getId(), event.getNpc().getName())) return;
+		Collection<ItemStack> items = event.getItems();
+		List<ItemStack> uncovered = npcLootEventGate.takeFallback(localRecordAccount(), event.getNpc().getName(),
+			items, client.getTickCount());
+		if (uncovered != null)
+		{
+			List<ItemStack> worthSending = valuableExtras(uncovered);
+			dropDiagnosticJournal.record(UUID.randomUUID().toString(), "REPEAT", "late primary matched source="
+				+ event.getNpc().getName() + " extra=" + uncovered.size() + " sent=" + worthSending.size());
+			if (worthSending.isEmpty()) return;
+			items = worthSending;
+		}
 		npcLootEventGate.recordPrimary(localRecordAccount(), event.getNpc().getName(),
-			event.getItems(), client.getTickCount());
-		detectLoot(event.getNpc().getName(), event.getItems(), LootRecordType.NPC.name(),
+			items, client.getTickCount());
+		detectLoot(event.getNpc().getName(), items, LootRecordType.NPC.name(),
 			event.getNpc().getId(), null);
 	}
 
@@ -975,9 +986,23 @@ public class ClanMessagesPlugin extends Plugin
 					dropDiagnosticJournal.record(dropEventId, "SESSION", "state=CANCEL source=" + source);
 					return true;
 				}
-				if (npcLootEventGate.consumePrimary(account, source, items, tick)) return true;
-				log.debug("NPC tracker-only loot accepted: source={}, items={}", source, items.size());
-				detectLoot(source, items, LootRecordType.NPC.name(), null, null, dropEventId);
+				// Match its own primary first, so identical kills each keep their delivery.
+				List<ItemStack> uncovered = npcLootEventGate.takePrimary(account, source, items, tick);
+				if (uncovered == null && npcLootEventGate.isRepeatOfConsumed(account, source, items, tick))
+				{
+					dropDiagnosticJournal.record(dropEventId, "REPEAT", "extra tracker copy ignored source=" + source);
+					return true;
+				}
+				List<ItemStack> delivered = uncovered == null ? items : valuableExtras(uncovered);
+				if (uncovered != null)
+				{
+					dropDiagnosticJournal.record(dropEventId, "REPEAT", "tracker matched primary source=" + source
+						+ " extra=" + uncovered.size() + " sent=" + delivered.size());
+				}
+				if (delivered.isEmpty()) return true;
+				log.debug("NPC tracker-only loot accepted: source={}, items={}", source, delivered.size());
+				npcLootEventGate.recordFallback(account, source, delivered, tick);
+				detectLoot(source, delivered, LootRecordType.NPC.name(), null, null, dropEventId);
 				return true;
 			});
 			return;
@@ -1062,7 +1087,7 @@ public class ClanMessagesPlugin extends Plugin
 		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
 		// The accepted loot event is enough to record MVP drops. A missing or delayed
 		// screenshot must not prevent the account's drop from reaching the server.
-		dropDiagnosticJournal.record(dropEventId, "DETECTED", "items=" + grouped.size());
+		dropDiagnosticJournal.record(dropEventId, "DETECTED", "items=" + grouped.size() + " source=" + normalizedSource);
 		log.debug("Drop {} detected: source={}, category={}, items={}", dropEventId,
 			normalizedSource, category, grouped.size());
 		recordMvpDrops(immediate, normalizedSource, singleItemValueOverride, dropEventId);
@@ -1263,6 +1288,18 @@ public class ClanMessagesPlugin extends Plugin
 	static boolean usesNpcTrackerFallback(LootRecordType type, String name)
 	{
 		return type == LootRecordType.NPC && !isSpecialLootNpc(name);
+	}
+
+	/** Items only one loot notification listed are usually crushed bones or ashes; keep only MVP-worthy ones. */
+	private List<ItemStack> valuableExtras(List<ItemStack> extras)
+	{
+		List<ItemStack> valuable = new ArrayList<>();
+		for (ItemStack item : extras)
+		{
+			if (DropItemPricing.unitPrice(itemManager, item.getId()) * item.getQuantity() >= MVP_DROP_MINIMUM_VALUE)
+				valuable.add(item);
+		}
+		return valuable;
 	}
 
 	private void captureDetectedDrop(java.util.function.Consumer<java.awt.Image> delivery)
