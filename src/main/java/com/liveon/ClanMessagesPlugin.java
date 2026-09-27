@@ -80,7 +80,6 @@ import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.Notifier;
 import net.runelite.client.util.LinkBrowser;
 import net.runelite.client.util.Text;
 import okhttp3.HttpUrl;
@@ -244,7 +243,6 @@ public class ClanMessagesPlugin extends Plugin
 	@Inject private Gson gson;
 	@Inject private ClanMessagesConfig config;
 	@Inject private ConfigManager configManager;
-	@Inject private Notifier notifier;
 	@Inject private OverlayManager overlayManager;
 
 	private ScheduledExecutorService executor;
@@ -284,7 +282,13 @@ public class ClanMessagesPlugin extends Plugin
 	private final java.util.Set<String> locallyDisplayedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> deliveredPinnedMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.Set<String> displayedPendingRankRequests = java.util.concurrent.ConcurrentHashMap.newKeySet();
-	private final java.util.Set<String> sessionRankNotifications = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private static final int RANK_NOTICE_DELAY_SECONDS = 10;
+	private static final int PRIVATE_CHAT_RESTORE_SECONDS = 3;
+	private final AtomicBoolean privateChatHidden = new AtomicBoolean();
+	/** Highest rank index already announced per account in this session. */
+	private final Map<String, Integer> notifiedRankIndexes = new java.util.concurrent.ConcurrentHashMap<>();
+	/** Highest rank seen while waiting for the account data to settle, per account. */
+	private final Map<String, String> pendingRankNotices = new java.util.concurrent.ConcurrentHashMap<>();
 	private volatile boolean isStaff = false;
 	private boolean canPublishBroadcast = false;
 	private String verifiedAccount = "";
@@ -425,7 +429,7 @@ public class ClanMessagesPlugin extends Plugin
 		dropDeliveryClient.setOutbox(new DropOutbox(
 			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/pending-drops"), gson));
 		dropFrameCapture = new DropFrameCapture(executor,
-			action -> clientThread.invokeLater(action), drawManager::requestNextFrameListener);
+			action -> clientThread.invokeLater(action), this::requestScreenshotFrame);
 		RankVisuals.registerChatIcons(chatIconManager);
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		eventOverlay = new ClanEventOverlay(this);
@@ -467,6 +471,7 @@ public class ClanMessagesPlugin extends Plugin
 			dropDeliveryClient.close();
 			dropDeliveryClient = null;
 		}
+		restorePrivateChat();
 		if (dropFrameCapture != null)
 		{
 			dropFrameCapture.close();
@@ -943,9 +948,20 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		log.debug("NPC loot event: source={}, items={}", event.getNpc().getName(), event.getItems().size());
 		if (!usesNpcLootReceived(event.getNpc().getId(), event.getNpc().getName())) return;
+		Collection<ItemStack> items = event.getItems();
+		List<ItemStack> uncovered = npcLootEventGate.takeFallback(localRecordAccount(), event.getNpc().getName(),
+			items, client.getTickCount());
+		if (uncovered != null)
+		{
+			List<ItemStack> worthSending = valuableExtras(uncovered);
+			dropDiagnosticJournal.record(UUID.randomUUID().toString(), "REPEAT", "late primary matched source="
+				+ event.getNpc().getName() + " extra=" + uncovered.size() + " sent=" + worthSending.size());
+			if (worthSending.isEmpty()) return;
+			items = worthSending;
+		}
 		npcLootEventGate.recordPrimary(localRecordAccount(), event.getNpc().getName(),
-			event.getItems(), client.getTickCount());
-		detectLoot(event.getNpc().getName(), event.getItems(), LootRecordType.NPC.name(),
+			items, client.getTickCount());
+		detectLoot(event.getNpc().getName(), items, LootRecordType.NPC.name(),
 			event.getNpc().getId(), null);
 	}
 
@@ -975,9 +991,23 @@ public class ClanMessagesPlugin extends Plugin
 					dropDiagnosticJournal.record(dropEventId, "SESSION", "state=CANCEL source=" + source);
 					return true;
 				}
-				if (npcLootEventGate.consumePrimary(account, source, items, tick)) return true;
-				log.debug("NPC tracker-only loot accepted: source={}, items={}", source, items.size());
-				detectLoot(source, items, LootRecordType.NPC.name(), null, null, dropEventId);
+				// Match its own primary first, so identical kills each keep their delivery.
+				List<ItemStack> uncovered = npcLootEventGate.takePrimary(account, source, items, tick);
+				if (uncovered == null && npcLootEventGate.isRepeatOfConsumed(account, source, items, tick))
+				{
+					dropDiagnosticJournal.record(dropEventId, "REPEAT", "extra tracker copy ignored source=" + source);
+					return true;
+				}
+				List<ItemStack> delivered = uncovered == null ? items : valuableExtras(uncovered);
+				if (uncovered != null)
+				{
+					dropDiagnosticJournal.record(dropEventId, "REPEAT", "tracker matched primary source=" + source
+						+ " extra=" + uncovered.size() + " sent=" + delivered.size());
+				}
+				if (delivered.isEmpty()) return true;
+				log.debug("NPC tracker-only loot accepted: source={}, items={}", source, delivered.size());
+				npcLootEventGate.recordFallback(account, source, delivered, tick);
+				detectLoot(source, delivered, LootRecordType.NPC.name(), null, null, dropEventId);
 				return true;
 			});
 			return;
@@ -1062,7 +1092,7 @@ public class ClanMessagesPlugin extends Plugin
 		if (!sendImmediate && !bingoDropParticipationEnabled()) return;
 		// The accepted loot event is enough to record MVP drops. A missing or delayed
 		// screenshot must not prevent the account's drop from reaching the server.
-		dropDiagnosticJournal.record(dropEventId, "DETECTED", "items=" + grouped.size());
+		dropDiagnosticJournal.record(dropEventId, "DETECTED", "items=" + grouped.size() + " source=" + normalizedSource);
 		log.debug("Drop {} detected: source={}, category={}, items={}", dropEventId,
 			normalizedSource, category, grouped.size());
 		recordMvpDrops(immediate, normalizedSource, singleItemValueOverride, dropEventId);
@@ -1263,6 +1293,46 @@ public class ClanMessagesPlugin extends Plugin
 	static boolean usesNpcTrackerFallback(LootRecordType type, String name)
 	{
 		return type == LootRecordType.NPC && !isSpecialLootNpc(name);
+	}
+
+	/** Next frame for a Discord screenshot, with the split private chat hidden for it (as Dink does). */
+	private void requestScreenshotFrame(java.util.function.Consumer<java.awt.Image> listener)
+	{
+		clientThread.invokeLater(() -> {
+			Widget privateChat = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (config.hidePrivateMessagesInScreenshots() && privateChat != null && !privateChat.isHidden()
+				&& privateChatHidden.compareAndSet(false, true))
+			{
+				privateChat.setHidden(true);
+				executor.schedule(this::restorePrivateChat, PRIVATE_CHAT_RESTORE_SECONDS, TimeUnit.SECONDS);
+			}
+			drawManager.requestNextFrameListener(image -> {
+				restorePrivateChat();
+				listener.accept(image);
+			});
+		});
+	}
+
+	/** Always shows the private chat again: after the frame, after a timeout, or on shutdown. */
+	private void restorePrivateChat()
+	{
+		if (!privateChatHidden.getAndSet(false)) return;
+		clientThread.invokeLater(() -> {
+			Widget privateChat = client.getWidget(InterfaceID.PmChat.CONTAINER);
+			if (privateChat != null) privateChat.setHidden(false);
+		});
+	}
+
+	/** Items only one loot notification listed are usually crushed bones or ashes; keep only MVP-worthy ones. */
+	private List<ItemStack> valuableExtras(List<ItemStack> extras)
+	{
+		List<ItemStack> valuable = new ArrayList<>();
+		for (ItemStack item : extras)
+		{
+			if (DropItemPricing.unitPrice(itemManager, item.getId()) * item.getQuantity() >= MVP_DROP_MINIMUM_VALUE)
+				valuable.add(item);
+		}
+		return valuable;
 	}
 
 	private void captureDetectedDrop(java.util.function.Consumer<java.awt.Image> delivery)
@@ -2083,11 +2153,30 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 
-		String sessionKey = accountKey + "|" + eligibleRank.toLowerCase(java.util.Locale.ROOT);
+		Integer notifiedIndex = notifiedRankIndexes.get(accountKey);
 		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex,
-			sessionRankNotifications.contains(sessionKey), rankRequestStatusKnown && rankRequestPending)) return;
-		sessionRankNotifications.add(sessionKey);
-		String message = rankNotificationMessage(eligibleRank);
+			notifiedIndex == null ? -1 : notifiedIndex, rankRequestStatusKnown && rankRequestPending)) return;
+		// Account data arrives in parts after login; wait and announce only the highest rank.
+		String pending = pendingRankNotices.get(accountKey);
+		if (pending != null)
+		{
+			if (eligibleIndex > regularRankIndex(pending)) pendingRankNotices.put(accountKey, eligibleRank);
+			return;
+		}
+		pendingRankNotices.put(accountKey, eligibleRank);
+		executor.schedule(() -> clientThread.invokeLater(() -> announcePendingRank(accountKey, currentIndex)),
+			RANK_NOTICE_DELAY_SECONDS, TimeUnit.SECONDS);
+	}
+
+	private void announcePendingRank(String accountKey, int currentIndex)
+	{
+		String eligibleRank = pendingRankNotices.remove(accountKey);
+		if (eligibleRank == null || !config.enabled()) return;
+		int eligibleIndex = regularRankIndex(eligibleRank);
+		Integer notifiedIndex = notifiedRankIndexes.get(accountKey);
+		if (!shouldNotifyAvailableRank(currentIndex, eligibleIndex,
+			notifiedIndex == null ? -1 : notifiedIndex, rankRequestStatusKnown && rankRequestPending)) return;
+		notifiedRankIndexes.put(accountKey, eligibleIndex);
 		ChatMessageBuilder builder = new ChatMessageBuilder()
 			.append(Color.GREEN, "[Live On] ")
 			.append(Color.WHITE, "Promoção de rank disponível: ");
@@ -2097,19 +2186,14 @@ public class ClanMessagesPlugin extends Plugin
 			.type(ChatMessageType.CONSOLE)
 			.runeLiteFormattedMessage(builder.build())
 			.build());
-		notifier.notify(message);
-	}
-
-	static String rankNotificationMessage(String rank)
-	{
-		return "[Live On] Promoção de rank disponível: " + rank + "! Solicite pelo plugin do clã.";
 	}
 
 	static boolean shouldNotifyAvailableRank(int currentIndex, int eligibleIndex,
-		boolean notifiedThisSession, boolean requestPending)
+		int notifiedIndex, boolean requestPending)
 	{
 		if (requestPending || currentIndex < 0 || eligibleIndex <= currentIndex) return false;
-		return !notifiedThisSession;
+		// Never announce a rank equal to or below one already announced this session.
+		return eligibleIndex > notifiedIndex;
 	}
 
 	private Icon clanRankIconFor(String displayRank)
@@ -3395,7 +3479,7 @@ public class ClanMessagesPlugin extends Plugin
 			Boolean previouslyOwned = pendingPetPreviouslyOwned == null ? Boolean.TRUE : pendingPetPreviouslyOwned;
 			resetPendingPet();
 			if (config.discordDropsEnabled())
-				drawManager.requestNextFrameListener(image -> sendPetNotification(playerName, petName, milestone,
+				requestScreenshotFrame(image -> sendPetNotification(playerName, petName, milestone,
 					gameMessage, duplicate, backpack, previouslyOwned, image));
 		}
 		if (clanLiveBadgeDecorator != null)
@@ -4394,7 +4478,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			return;
 		}
-		long interval = Math.max(5, config.pollIntervalSeconds());
+		long interval = Math.max(5, config.messagePollSeconds());
 		pollingTask = executor.scheduleAtFixedRate(this::fetchMessages, 0, interval, TimeUnit.SECONDS);
 		mvpDropsPollingTask = executor.scheduleAtFixedRate(this::fetchMvpRankings, 2, 60, TimeUnit.SECONDS);
 		if (isStaff && hasStaffAccessKey())
@@ -4589,6 +4673,7 @@ public class ClanMessagesPlugin extends Plugin
 						targetPanel.setMvpDrops(ranking == null
 							? java.util.Collections.emptyList()
 							: java.util.Arrays.asList(ranking), result == null ? null : result.own);
+						targetPanel.setMvpMonthTotal(result == null ? 0 : result.monthTotal);
 					}
 				}
 			}

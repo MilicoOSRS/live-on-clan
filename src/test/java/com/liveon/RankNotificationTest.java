@@ -7,29 +7,34 @@ import static org.junit.Assert.assertEquals;
 public class RankNotificationTest
 {
 	@Test
-	public void formatsAvailableRankMessage()
+	public void notifiesForHigherRank()
 	{
-		assertEquals(
-			"[Live On] Promoção de rank disponível: Sargento! Solicite pelo plugin do clã.",
-			ClanMessagesPlugin.rankNotificationMessage("Sargento"));
+		assertEquals(true, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, -1, false));
 	}
 
 	@Test
-	public void notifiesImmediatelyForHigherRank()
+	public void neverRepeatsRankAlreadyAnnouncedThisSession()
 	{
-		assertEquals(true, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, false, false));
+		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, 2, false));
 	}
 
 	@Test
-	public void notifiesOnlyOncePerSessionForSameRank()
+	public void neverAnnouncesLowerRankAfterHigherOne()
 	{
-		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, true, false));
+		// Cadete (4) was announced; a late recalculation to Aluno (2) must stay silent.
+		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, 4, false));
+	}
+
+	@Test
+	public void stillAnnouncesGenuinelyHigherRankLater()
+	{
+		assertEquals(true, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 5, 4, false));
 	}
 
 	@Test
 	public void suppressesCurrentAndPendingRanks()
 	{
-		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(2, 2, false, false));
-		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, false, true));
+		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(2, 2, -1, false));
+		assertEquals(false, ClanMessagesPlugin.shouldNotifyAvailableRank(1, 2, -1, true));
 	}
 }
