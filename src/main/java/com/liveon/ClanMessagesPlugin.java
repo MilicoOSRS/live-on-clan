@@ -71,11 +71,9 @@ import net.runelite.client.events.NpcLootReceived;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
-import net.runelite.client.plugins.PluginDependency;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.plugins.loottracker.LootTrackerConfig;
-import net.runelite.client.plugins.loottracker.LootTrackerPlugin;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -93,7 +91,6 @@ import net.runelite.http.api.loottracker.LootRecordType;
 
 @Slf4j
 @PluginDescriptor(name = "Live On Clan")
-@PluginDependency(LootTrackerPlugin.class)
 public class ClanMessagesPlugin extends Plugin
 {
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
