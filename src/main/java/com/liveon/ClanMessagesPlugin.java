@@ -159,6 +159,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final int DISCORD_EMBED_DESCRIPTION_LIMIT = 4096;
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
+	private static final Pattern COLOR_TAG_PATTERN = Pattern.compile("<col=[0-9a-fA-F]{6}>|</col>");
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
 	// Drop exceptions modelled after Dink's loot filters. A trailing '*' matches
 	// item variants. Official RuneLite loot events remain the source of truth.
@@ -857,10 +858,15 @@ public class ClanMessagesPlugin extends Plugin
 				if (isLive) badges.append(" <col=96ffaa>LIVE</col>");
 				badges.append(clanTagBadges(playerKey));
 				int insertionIndex = originalIndexAfterVisiblePrefix(message, playerKey);
+				if (insertionIndex < 0) log.debug("Clan badge not placed (name not found in raw text): key={}, raw={}",
+					playerKey, message.replace(' ', '~'));
 				if (badges.length() > 0 && insertionIndex >= 0 && !message.contains(badges.toString()))
 				{
+					// Badges end with </col>, which drops a custom message colour (a purple clan
+					// broadcast turned white after the badge). Re-open the colour that was active.
+					String activeColor = activeColorTag(message, insertionIndex);
 					objectStack[stackIndex] = message.substring(0, insertionIndex) + badges
-						+ message.substring(insertionIndex);
+						+ (activeColor == null ? "" : activeColor) + message.substring(insertionIndex);
 				}
 				return;
 			}
@@ -882,7 +888,20 @@ public class ClanMessagesPlugin extends Plugin
 				&& lowerMessage.contains(" personal best:"));
 	}
 
-	private static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
+	/** The colour tag still open at {@code index}, or null when the text there has the default colour. */
+	static String activeColorTag(String text, int index)
+	{
+		java.util.Deque<String> open = new java.util.ArrayDeque<>();
+		Matcher matcher = COLOR_TAG_PATTERN.matcher(text.substring(0, index));
+		while (matcher.find())
+		{
+			if (matcher.group().startsWith("</")) open.pollFirst();
+			else open.push(matcher.group());
+		}
+		return open.peekFirst();
+	}
+
+	static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
 	{
 		int originalIndex = 0;
 		int visibleIndex = 0;
@@ -896,6 +915,12 @@ public class ClanMessagesPlugin extends Plugin
 				continue;
 			}
 			char actual = text.charAt(originalIndex) == '\u00A0' ? ' ' : text.charAt(originalIndex);
+			// Account icons are followed by a space ("<img=2> Akazudo"); the visible prefix is trimmed.
+			if (visibleIndex == 0 && actual == ' ')
+			{
+				originalIndex++;
+				continue;
+			}
 			if (Character.toLowerCase(actual) != Character.toLowerCase(visiblePrefix.charAt(visibleIndex)))
 			{
 				return -1;
