@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -413,7 +412,8 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			log.info("Live On local low-value drop test mode enabled");
 		}
-		executor = Executors.newSingleThreadScheduledExecutor();
+		// Log only: journaling here could loop if the failing task was the journal writer itself.
+		executor = new LoggingScheduledExecutor(failure -> log.warn("Live On background task failed", failure));
 		dropDeliveryClient = new DropDeliveryClient(okHttpClient, clientThread, executor);
 		dropDiagnosticJournal = new DropDiagnosticJournal(
 			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/drop-diagnostics.log"), executor);
