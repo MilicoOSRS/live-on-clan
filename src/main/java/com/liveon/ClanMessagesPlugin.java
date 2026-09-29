@@ -1101,7 +1101,8 @@ public class ClanMessagesPlugin extends Plugin
 		identity.put("world", client.getWorld());
 		identity.put("dinkAccountHash", liveOnAccountHash(dropPlayer));
 		captureDetectedDrop(image -> {
-			dropDiagnosticJournal.record(dropEventId, "CAPTURE", image == null ? "missing" : "available");
+			dropDiagnosticJournal.record(dropEventId, "CAPTURE", image == null ? "missing" : "available "
+				+ image.getWidth(null) + "x" + image.getHeight(null));
 			log.debug("Drop {} capture complete: hasFrame={}", dropEventId, image != null);
 			if (RaidLootContext.isRaid(eventSource))
 				log.debug("Raid drop screenshot selected: source={}, hasFrame={}", eventSource, image != null);
@@ -1131,6 +1132,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				executor.schedule(() -> clientThread.invokeLater(() -> {
 					if (config.enabled()) delivery.run();
+					else dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "plugin_disabled");
 				}),
 					RAID_LOOT_CONTEXT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
 			}
@@ -1164,7 +1166,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			deliver.accept(image);
 		}
-		catch (RuntimeException exception)
+		catch (Exception | Error exception)
 		{
 			recordDropFailure(dropEventId, "DELIVERY", exception);
 			if (image == null) return;
@@ -1172,7 +1174,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				deliver.accept(null);
 			}
-			catch (RuntimeException retryException)
+			catch (Exception | Error retryException)
 			{
 				recordDropFailure(dropEventId, "DELIVERY_NO_IMAGE", retryException);
 			}
@@ -1181,7 +1183,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	// RuneLite's EventBus only logs subscriber exceptions to client.log; keep a trace in the
 	// plugin's own journal so a lost drop is diagnosable without the player's full client log.
-	private void recordDropFailure(String dropEventId, String stage, RuntimeException exception)
+	private void recordDropFailure(String dropEventId, String stage, Throwable exception)
 	{
 		log.warn("Drop {} failed at {}", dropEventId, stage, exception);
 		String location = "unknown";
@@ -1528,7 +1530,12 @@ public class ClanMessagesPlugin extends Plugin
 		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, Integer dropKillCount,
 		String playerName, Map<String, Object> identity, String dropEventId)
 	{
-		if (items.isEmpty()) return;
+		// Every early exit is recorded, so a drop that never reaches Discord always says why.
+		if (items.isEmpty())
+		{
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "no_items");
+			return;
+		}
 		long totalValue = 0;
 		for (ItemStack item : items)
 		{
@@ -1541,12 +1548,14 @@ public class ClanMessagesPlugin extends Plugin
 		if (matchesDiscordFilter(DISCORD_SOURCE_DENYLIST, source))
 		{
 			log.debug("Discord drop skipped for denied source: {}", source);
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "denied_source");
 			return;
 		}
 		long minimumValue = lowValueDropTest ? 1L : Math.max(0, config.discordDropMinimumValue());
 		if (!config.discordDropsEnabled())
 		{
 			log.debug("Discord drop not requested: sending option disabled; source={}", source);
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "option_disabled");
 			return;
 		}
 		boolean clueTotalEligible = source != null && source.startsWith("Clue Scroll (")
@@ -3043,6 +3052,10 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		executor.execute(() -> {
+			String eventId = requestTemplate.header("X-Live-On-Event");
+			// This task runs on our executor, which silently discards anything thrown here. Record every
+			// failure and fall back to sending without the screenshot: a drop without an image is better
+			// than a drop that never reaches Discord.
 			byte[] screenshotBytes = null;
 			if (screenshot instanceof BufferedImage)
 			{
@@ -3050,33 +3063,72 @@ public class ClanMessagesPlugin extends Plugin
 				{
 					screenshotBytes = dropScreenshotEncoder.encode((BufferedImage) screenshot);
 				}
-				catch (IOException | RuntimeException exception)
+				catch (Exception | Error exception)
 				{
-					log.debug("Unable to prepare {} screenshot; sending without it", destination, exception);
+					recordDiscordFailure(eventId, "DISCORD_IMAGE_FAILED", destination, exception);
+					DropMultipartPayload.addScreenshotStatus(embed, DropMultipartPayload.screenshotStatus(
+						exception instanceof OutOfMemoryError ? DropMultipartPayload.ENCODE_OUT_OF_MEMORY
+							: DropMultipartPayload.ENCODE_FAILED, exception));
 				}
-			}
-			DropMultipartPayload bodies = DropMultipartPayload.create(
-				gson, payload, embed, screenshotBytes, attachmentName);
-			String eventId = requestTemplate.header("X-Live-On-Event");
-			if (eventId != null) dropDiagnosticJournal.record(eventId, "DISCORD_PREPARED",
-				screenshotBytes == null ? "image=missing" : "image=available bytes=" + screenshotBytes.length);
-			DropDeliveryClient delivery = dropDeliveryClient;
-			if (delivery != null)
-			{
-				log.debug("{} prepared for server request", destination);
-				delivery.send(
-					requestTemplate.newBuilder().header("X-Live-On-Image",
-						screenshotBytes == null ? "absent" : "present").post(bodies.initialBody).build(),
-					requestTemplate.newBuilder().header("X-Live-On-Image", "absent")
-						.post(bodies.retryBody).build(),
-					destination,
-					() -> recordDeliveryState(requestTemplate.header("X-Live-On-Player"), config.discordDropsEnabled()));
 			}
 			else
 			{
-				log.debug("{} could not start: delivery client unavailable", destination);
+				DropMultipartPayload.addScreenshotStatus(embed,
+					DropMultipartPayload.screenshotStatus(DropMultipartPayload.CAPTURE_MISSING, null));
+			}
+			try
+			{
+				sendDiscordBodies(requestTemplate, payload, embed, screenshotBytes, attachmentName, destination);
+			}
+			catch (Exception | Error exception)
+			{
+				recordDiscordFailure(eventId, "DISCORD_FAILED", destination, exception);
+				if (screenshotBytes == null) return;
+				DropMultipartPayload.addScreenshotStatus(embed,
+					DropMultipartPayload.screenshotStatus(DropMultipartPayload.SEND_FAILED, exception));
+				try
+				{
+					sendDiscordBodies(requestTemplate, payload, embed, null, attachmentName, destination);
+				}
+				catch (Exception | Error retryException)
+				{
+					recordDiscordFailure(eventId, "DISCORD_FAILED", destination + " without image", retryException);
+				}
 			}
 		});
+	}
+
+	private void sendDiscordBodies(Request requestTemplate, Map<String, Object> payload, Map<String, Object> embed,
+		byte[] screenshotBytes, String attachmentName, String destination)
+	{
+		DropMultipartPayload bodies = DropMultipartPayload.create(
+			gson, payload, embed, screenshotBytes, attachmentName);
+		String eventId = requestTemplate.header("X-Live-On-Event");
+		if (eventId != null) dropDiagnosticJournal.record(eventId, "DISCORD_PREPARED",
+			screenshotBytes == null ? "image=missing" : "image=available bytes=" + screenshotBytes.length);
+		DropDeliveryClient delivery = dropDeliveryClient;
+		if (delivery != null)
+		{
+			log.debug("{} prepared for server request", destination);
+			delivery.send(
+				requestTemplate.newBuilder().header("X-Live-On-Image",
+					screenshotBytes == null ? "absent" : "present").post(bodies.initialBody).build(),
+				requestTemplate.newBuilder().header("X-Live-On-Image", "absent")
+					.post(bodies.retryBody).build(),
+				destination,
+				() -> recordDeliveryState(requestTemplate.header("X-Live-On-Player"), config.discordDropsEnabled()));
+		}
+		else
+		{
+			log.debug("{} could not start: delivery client unavailable", destination);
+		}
+	}
+
+	private void recordDiscordFailure(String eventId, String stage, String destination, Throwable exception)
+	{
+		log.warn("{} failed at {}", destination, stage, exception);
+		if (eventId != null) dropDiagnosticJournal.record(eventId, stage,
+			exception.getClass().getSimpleName() + ": " + String.valueOf(exception.getMessage()).replaceAll("\\s+", " "));
 	}
 
 	private static Map<String, Object> embedField(String name, String value, boolean inline)
