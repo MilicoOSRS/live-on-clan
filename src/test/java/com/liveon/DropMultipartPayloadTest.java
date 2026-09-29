@@ -33,6 +33,22 @@ public class DropMultipartPayloadTest
 		assertTrue(retryJson.contains("event-123"));
 		assertTrue(retryJson.contains("Milico"));
 		assertFalse(embed.containsKey("image"));
+		// Only the size-rejected retry says why the screenshot is missing; the embed is left as it was.
+		assertTrue(retryJson.contains("erro 301"));
+		assertFalse(initialJson.contains("erro 301"));
+		assertFalse(embed.containsKey("fields"));
+	}
+
+	@Test
+	public void screenshotStatusShowsCodeAndErrorTypeOnly()
+	{
+		assertEquals("indisponível (erro 101)", DropMultipartPayload.screenshotStatus(101, null));
+		assertEquals("indisponível (erro 202 · IllegalArgumentException)", DropMultipartPayload.screenshotStatus(
+			202, new IllegalArgumentException("C:\\Users\\someone\\secret")));
+		Map<String, Object> embed = new LinkedHashMap<>();
+		embed.put("fields", Collections.singletonList(Collections.singletonMap("name", "Total Value")));
+		DropMultipartPayload.addScreenshotStatus(embed, "indisponível (erro 101)");
+		assertEquals(2, ((java.util.List<?>) embed.get("fields")).size());
 	}
 
 	private static String bodyText(MultipartBody body) throws Exception

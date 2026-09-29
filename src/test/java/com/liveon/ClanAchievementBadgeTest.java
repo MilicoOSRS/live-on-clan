@@ -27,4 +27,25 @@ public class ClanAchievementBadgeTest
 	{
 		assertFalse(ClanMessagesPlugin.isDecoratableClanAchievement("player: hello clan"));
 	}
+
+	@Test
+	public void badgesKeepTheMessageColourOpenAfterThem()
+	{
+		String message = "<col=9a39ff>Hoag B received a drop: Inquisitor's plateskirt</col>";
+		int afterName = "<col=9a39ff>Hoag B".length();
+		org.junit.Assert.assertEquals("<col=9a39ff>", ClanMessagesPlugin.activeColorTag(message, afterName));
+		org.junit.Assert.assertNull(ClanMessagesPlugin.activeColorTag("Hoag B received a drop", 6));
+		org.junit.Assert.assertEquals("<col=9a39ff>", ClanMessagesPlugin.activeColorTag(
+			"<col=9a39ff><col=ffffff>Hoag</col> B received", "<col=9a39ff><col=ffffff>Hoag</col> B".length()));
+	}
+
+	@Test
+	public void findsTheNameAfterAnAccountIconAndItsSpace()
+	{
+		String raw = "<col=8000ff><img=2> Akazudo received a new collection log item: Big bass (892/1717)</col>";
+		org.junit.Assert.assertEquals("<col=8000ff><img=2> Akazudo".length(),
+			ClanMessagesPlugin.originalIndexAfterVisiblePrefix(raw, "akazudo"));
+		org.junit.Assert.assertEquals("Pirozinha".length(),
+			ClanMessagesPlugin.originalIndexAfterVisiblePrefix("Pirozinha received a drop:", "pirozinha"));
+	}
 }

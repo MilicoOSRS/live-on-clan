@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -160,6 +159,7 @@ public class ClanMessagesPlugin extends Plugin
 	private static final int DISCORD_EMBED_DESCRIPTION_LIMIT = 4096;
 	// Internal script called by rebuildchatbox after the vanilla clan rank is resolved.
 	private static final int ADD_CHATBOX_MESSAGE_SCRIPT = 4483;
+	private static final Pattern COLOR_TAG_PATTERN = Pattern.compile("<col=[0-9a-fA-F]{6}>|</col>");
 	private static final String WOM_USER_AGENT = "Live-On-RuneLite-Plugin";
 	// Drop exceptions modelled after Dink's loot filters. A trailing '*' matches
 	// item variants. Official RuneLite loot events remain the source of truth.
@@ -413,7 +413,8 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			log.info("Live On local low-value drop test mode enabled");
 		}
-		executor = Executors.newSingleThreadScheduledExecutor();
+		// Log only: journaling here could loop if the failing task was the journal writer itself.
+		executor = new LoggingScheduledExecutor(failure -> log.warn("Live On background task failed", failure));
 		dropDeliveryClient = new DropDeliveryClient(okHttpClient, clientThread, executor);
 		dropDiagnosticJournal = new DropDiagnosticJournal(
 			net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("live-on-clan/drop-diagnostics.log"), executor);
@@ -857,10 +858,15 @@ public class ClanMessagesPlugin extends Plugin
 				if (isLive) badges.append(" <col=96ffaa>LIVE</col>");
 				badges.append(clanTagBadges(playerKey));
 				int insertionIndex = originalIndexAfterVisiblePrefix(message, playerKey);
+				if (insertionIndex < 0) log.debug("Clan badge not placed (name not found in raw text): key={}, raw={}",
+					playerKey, message.replace(' ', '~'));
 				if (badges.length() > 0 && insertionIndex >= 0 && !message.contains(badges.toString()))
 				{
+					// Badges end with </col>, which drops a custom message colour (a purple clan
+					// broadcast turned white after the badge). Re-open the colour that was active.
+					String activeColor = activeColorTag(message, insertionIndex);
 					objectStack[stackIndex] = message.substring(0, insertionIndex) + badges
-						+ message.substring(insertionIndex);
+						+ (activeColor == null ? "" : activeColor) + message.substring(insertionIndex);
 				}
 				return;
 			}
@@ -882,7 +888,20 @@ public class ClanMessagesPlugin extends Plugin
 				&& lowerMessage.contains(" personal best:"));
 	}
 
-	private static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
+	/** The colour tag still open at {@code index}, or null when the text there has the default colour. */
+	static String activeColorTag(String text, int index)
+	{
+		java.util.Deque<String> open = new java.util.ArrayDeque<>();
+		Matcher matcher = COLOR_TAG_PATTERN.matcher(text.substring(0, index));
+		while (matcher.find())
+		{
+			if (matcher.group().startsWith("</")) open.pollFirst();
+			else open.push(matcher.group());
+		}
+		return open.peekFirst();
+	}
+
+	static int originalIndexAfterVisiblePrefix(String text, String visiblePrefix)
 	{
 		int originalIndex = 0;
 		int visibleIndex = 0;
@@ -896,6 +915,12 @@ public class ClanMessagesPlugin extends Plugin
 				continue;
 			}
 			char actual = text.charAt(originalIndex) == '\u00A0' ? ' ' : text.charAt(originalIndex);
+			// Account icons are followed by a space ("<img=2> Akazudo"); the visible prefix is trimmed.
+			if (visibleIndex == 0 && actual == ' ')
+			{
+				originalIndex++;
+				continue;
+			}
 			if (Character.toLowerCase(actual) != Character.toLowerCase(visiblePrefix.charAt(visibleIndex)))
 			{
 				return -1;
@@ -1101,7 +1126,8 @@ public class ClanMessagesPlugin extends Plugin
 		identity.put("world", client.getWorld());
 		identity.put("dinkAccountHash", liveOnAccountHash(dropPlayer));
 		captureDetectedDrop(image -> {
-			dropDiagnosticJournal.record(dropEventId, "CAPTURE", image == null ? "missing" : "available");
+			dropDiagnosticJournal.record(dropEventId, "CAPTURE", image == null ? "missing" : "available "
+				+ image.getWidth(null) + "x" + image.getHeight(null));
 			log.debug("Drop {} capture complete: hasFrame={}", dropEventId, image != null);
 			if (RaidLootContext.isRaid(eventSource))
 				log.debug("Raid drop screenshot selected: source={}, hasFrame={}", eventSource, image != null);
@@ -1131,6 +1157,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				executor.schedule(() -> clientThread.invokeLater(() -> {
 					if (config.enabled()) delivery.run();
+					else dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "plugin_disabled");
 				}),
 					RAID_LOOT_CONTEXT_WAIT_MILLIS, TimeUnit.MILLISECONDS);
 			}
@@ -1164,7 +1191,7 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			deliver.accept(image);
 		}
-		catch (RuntimeException exception)
+		catch (Exception | Error exception)
 		{
 			recordDropFailure(dropEventId, "DELIVERY", exception);
 			if (image == null) return;
@@ -1172,7 +1199,7 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				deliver.accept(null);
 			}
-			catch (RuntimeException retryException)
+			catch (Exception | Error retryException)
 			{
 				recordDropFailure(dropEventId, "DELIVERY_NO_IMAGE", retryException);
 			}
@@ -1181,7 +1208,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	// RuneLite's EventBus only logs subscriber exceptions to client.log; keep a trace in the
 	// plugin's own journal so a lost drop is diagnosable without the player's full client log.
-	private void recordDropFailure(String dropEventId, String stage, RuntimeException exception)
+	private void recordDropFailure(String dropEventId, String stage, Throwable exception)
 	{
 		log.warn("Drop {} failed at {}", dropEventId, stage, exception);
 		String location = "unknown";
@@ -1528,7 +1555,12 @@ public class ClanMessagesPlugin extends Plugin
 		Integer npcId, Long singleItemValueOverride, java.awt.Image screenshot, Integer dropKillCount,
 		String playerName, Map<String, Object> identity, String dropEventId)
 	{
-		if (items.isEmpty()) return;
+		// Every early exit is recorded, so a drop that never reaches Discord always says why.
+		if (items.isEmpty())
+		{
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "no_items");
+			return;
+		}
 		long totalValue = 0;
 		for (ItemStack item : items)
 		{
@@ -1541,12 +1573,14 @@ public class ClanMessagesPlugin extends Plugin
 		if (matchesDiscordFilter(DISCORD_SOURCE_DENYLIST, source))
 		{
 			log.debug("Discord drop skipped for denied source: {}", source);
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "denied_source");
 			return;
 		}
 		long minimumValue = lowValueDropTest ? 1L : Math.max(0, config.discordDropMinimumValue());
 		if (!config.discordDropsEnabled())
 		{
 			log.debug("Discord drop not requested: sending option disabled; source={}", source);
+			dropDiagnosticJournal.record(dropEventId, "DISCORD_SKIPPED", "option_disabled");
 			return;
 		}
 		boolean clueTotalEligible = source != null && source.startsWith("Clue Scroll (")
@@ -3043,6 +3077,10 @@ public class ClanMessagesPlugin extends Plugin
 			return;
 		}
 		executor.execute(() -> {
+			String eventId = requestTemplate.header("X-Live-On-Event");
+			// This task runs on our executor, which silently discards anything thrown here. Record every
+			// failure and fall back to sending without the screenshot: a drop without an image is better
+			// than a drop that never reaches Discord.
 			byte[] screenshotBytes = null;
 			if (screenshot instanceof BufferedImage)
 			{
@@ -3050,33 +3088,72 @@ public class ClanMessagesPlugin extends Plugin
 				{
 					screenshotBytes = dropScreenshotEncoder.encode((BufferedImage) screenshot);
 				}
-				catch (IOException | RuntimeException exception)
+				catch (Exception | Error exception)
 				{
-					log.debug("Unable to prepare {} screenshot; sending without it", destination, exception);
+					recordDiscordFailure(eventId, "DISCORD_IMAGE_FAILED", destination, exception);
+					DropMultipartPayload.addScreenshotStatus(embed, DropMultipartPayload.screenshotStatus(
+						exception instanceof OutOfMemoryError ? DropMultipartPayload.ENCODE_OUT_OF_MEMORY
+							: DropMultipartPayload.ENCODE_FAILED, exception));
 				}
-			}
-			DropMultipartPayload bodies = DropMultipartPayload.create(
-				gson, payload, embed, screenshotBytes, attachmentName);
-			String eventId = requestTemplate.header("X-Live-On-Event");
-			if (eventId != null) dropDiagnosticJournal.record(eventId, "DISCORD_PREPARED",
-				screenshotBytes == null ? "image=missing" : "image=available bytes=" + screenshotBytes.length);
-			DropDeliveryClient delivery = dropDeliveryClient;
-			if (delivery != null)
-			{
-				log.debug("{} prepared for server request", destination);
-				delivery.send(
-					requestTemplate.newBuilder().header("X-Live-On-Image",
-						screenshotBytes == null ? "absent" : "present").post(bodies.initialBody).build(),
-					requestTemplate.newBuilder().header("X-Live-On-Image", "absent")
-						.post(bodies.retryBody).build(),
-					destination,
-					() -> recordDeliveryState(requestTemplate.header("X-Live-On-Player"), config.discordDropsEnabled()));
 			}
 			else
 			{
-				log.debug("{} could not start: delivery client unavailable", destination);
+				DropMultipartPayload.addScreenshotStatus(embed,
+					DropMultipartPayload.screenshotStatus(DropMultipartPayload.CAPTURE_MISSING, null));
+			}
+			try
+			{
+				sendDiscordBodies(requestTemplate, payload, embed, screenshotBytes, attachmentName, destination);
+			}
+			catch (Exception | Error exception)
+			{
+				recordDiscordFailure(eventId, "DISCORD_FAILED", destination, exception);
+				if (screenshotBytes == null) return;
+				DropMultipartPayload.addScreenshotStatus(embed,
+					DropMultipartPayload.screenshotStatus(DropMultipartPayload.SEND_FAILED, exception));
+				try
+				{
+					sendDiscordBodies(requestTemplate, payload, embed, null, attachmentName, destination);
+				}
+				catch (Exception | Error retryException)
+				{
+					recordDiscordFailure(eventId, "DISCORD_FAILED", destination + " without image", retryException);
+				}
 			}
 		});
+	}
+
+	private void sendDiscordBodies(Request requestTemplate, Map<String, Object> payload, Map<String, Object> embed,
+		byte[] screenshotBytes, String attachmentName, String destination)
+	{
+		DropMultipartPayload bodies = DropMultipartPayload.create(
+			gson, payload, embed, screenshotBytes, attachmentName);
+		String eventId = requestTemplate.header("X-Live-On-Event");
+		if (eventId != null) dropDiagnosticJournal.record(eventId, "DISCORD_PREPARED",
+			screenshotBytes == null ? "image=missing" : "image=available bytes=" + screenshotBytes.length);
+		DropDeliveryClient delivery = dropDeliveryClient;
+		if (delivery != null)
+		{
+			log.debug("{} prepared for server request", destination);
+			delivery.send(
+				requestTemplate.newBuilder().header("X-Live-On-Image",
+					screenshotBytes == null ? "absent" : "present").post(bodies.initialBody).build(),
+				requestTemplate.newBuilder().header("X-Live-On-Image", "absent")
+					.post(bodies.retryBody).build(),
+				destination,
+				() -> recordDeliveryState(requestTemplate.header("X-Live-On-Player"), config.discordDropsEnabled()));
+		}
+		else
+		{
+			log.debug("{} could not start: delivery client unavailable", destination);
+		}
+	}
+
+	private void recordDiscordFailure(String eventId, String stage, String destination, Throwable exception)
+	{
+		log.warn("{} failed at {}", destination, stage, exception);
+		if (eventId != null) dropDiagnosticJournal.record(eventId, stage,
+			exception.getClass().getSimpleName() + ": " + String.valueOf(exception.getMessage()).replaceAll("\\s+", " "));
 	}
 
 	private static Map<String, Object> embedField(String name, String value, boolean inline)
