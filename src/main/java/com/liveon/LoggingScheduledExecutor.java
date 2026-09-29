@@ -38,9 +38,9 @@ final class LoggingScheduledExecutor extends ScheduledThreadPoolExecutor
 			{
 				failure = exception.getCause();
 			}
-			catch (InterruptedException exception)
+			catch (InterruptedException ignored)
 			{
-				Thread.currentThread().interrupt();
+				// Not reachable: the task is already done, so get() returns without waiting.
 			}
 		}
 		if (failure != null) onFailure.accept(failure);
