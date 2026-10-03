@@ -515,8 +515,9 @@ public class ClanMessagesPlugin extends Plugin
 			// shutDown can run on the Swing thread (toggling the plugin, hub updates); widgets may only
 			// be read on the client thread, and failing here left the plugin half-stopped.
 			ClanLiveBadgeDecorator decorator = clanLiveBadgeDecorator;
+			Set<String> tagMarkup = new java.util.HashSet<>(knownClanTagMarkup);
 			clanLiveBadgeDecorator = null;
-			clientThread.invokeLater(decorator::clearDecorations);
+			clientThread.invokeLater(() -> decorator.clearDecorations(tagMarkup));
 		}
 		okhttp3.Call womCall = currentWomCall;
 		if (womCall != null)

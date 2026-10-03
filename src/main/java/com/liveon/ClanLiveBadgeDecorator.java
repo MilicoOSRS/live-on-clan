@@ -18,6 +18,7 @@ final class ClanLiveBadgeDecorator
 	private final Client client;
 	private final ClanMessagesPlugin plugin;
 	private int lastRefreshTick = Integer.MIN_VALUE;
+	private Set<String> clearingTagMarkup;
 
 	ClanLiveBadgeDecorator(Client client, ClanMessagesPlugin plugin)
 	{
@@ -48,12 +49,24 @@ final class ClanLiveBadgeDecorator
 		decorateWidgetTree(playerList, plugin.isLiveStatusVisible(), visited, false);
 	}
 
-	void clearDecorations()
+	/**
+	 * Removes every badge. The tag markup is passed in because shutdown clears the plugin's known
+	 * tags before this runs on the client thread.
+	 */
+	void clearDecorations(Set<String> tagMarkup)
 	{
 		Widget playerList = client.getWidget(InterfaceID.ClansSidepanel.PLAYERLIST);
 		if (playerList == null) return;
 		Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-		decorateWidgetTree(playerList, false, visited, true);
+		clearingTagMarkup = tagMarkup;
+		try
+		{
+			decorateWidgetTree(playerList, false, visited, true);
+		}
+		finally
+		{
+			clearingTagMarkup = null;
+		}
 	}
 
 	private void decorateWidgetTree(Widget widget, boolean enabled, Set<Widget> visited, boolean includeHidden)
@@ -62,7 +75,9 @@ final class ClanLiveBadgeDecorator
 		String rawText = widget.getText();
 		if (rawText != null && !rawText.isEmpty())
 		{
-			String baseText = plugin.removeKnownClanTagMarkup(removeOwnMarkup(rawText));
+			String baseText = clearingTagMarkup != null
+				? removeMarkup(removeOwnMarkup(rawText), clearingTagMarkup)
+				: plugin.removeKnownClanTagMarkup(removeOwnMarkup(rawText));
 			String displayedText = Text.removeTags(baseText).trim();
 			String playerName = enabled ? plugin.decoratedPlayerNameIn(displayedText) : null;
 			String decoratedText = baseText;
@@ -84,6 +99,13 @@ final class ClanLiveBadgeDecorator
 	{
 		if (children == null) return;
 		for (Widget child : children) decorateWidgetTree(child, enabled, visited, includeHidden);
+	}
+
+	static String removeMarkup(String text, Set<String> markup)
+	{
+		String cleaned = text;
+		for (String item : markup) cleaned = cleaned.replace(item, "");
+		return cleaned;
 	}
 
 	private static String removeOwnMarkup(String text)
