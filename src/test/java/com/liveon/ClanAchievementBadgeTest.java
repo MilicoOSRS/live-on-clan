@@ -48,4 +48,13 @@ public class ClanAchievementBadgeTest
 		org.junit.Assert.assertEquals("Pirozinha".length(),
 			ClanMessagesPlugin.originalIndexAfterVisiblePrefix("Pirozinha received a drop:", "pirozinha"));
 	}
+
+	@Test
+	public void shutdownCleanupRemovesCustomTagsItWasGiven()
+	{
+		java.util.Set<String> tags = new java.util.HashSet<>(java.util.Arrays.asList(
+			" <col=ffc628>B</col>", " <col=c68cff>Brabo</col>"));
+		org.junit.Assert.assertEquals("Hardlaziness",
+			ClanLiveBadgeDecorator.removeMarkup("Hardlaziness <col=ffc628>B</col> <col=c68cff>Brabo</col>", tags));
+	}
 }
