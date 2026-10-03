@@ -512,8 +512,11 @@ public class ClanMessagesPlugin extends Plugin
 		}
 		if (clanLiveBadgeDecorator != null)
 		{
-			clanLiveBadgeDecorator.clearDecorations();
+			// shutDown can run on the Swing thread (toggling the plugin, hub updates); widgets may only
+			// be read on the client thread, and failing here left the plugin half-stopped.
+			ClanLiveBadgeDecorator decorator = clanLiveBadgeDecorator;
 			clanLiveBadgeDecorator = null;
+			clientThread.invokeLater(decorator::clearDecorations);
 		}
 		okhttp3.Call womCall = currentWomCall;
 		if (womCall != null)
@@ -3046,7 +3049,9 @@ public class ClanMessagesPlugin extends Plugin
 		extra.put("source", source);
 		// Dink only populates party for supported raids. An empty list is safer
 		// than claiming that every ordinary NPC/event drop came from a solo party.
-		extra.put("party", java.util.Collections.emptyList());
+		// A plain ArrayList: Gson cannot serialize Collections.emptyList() on Java 17+ (the JDK
+		// blocks access to its private class), which made every Discord drop fail for those players.
+		extra.put("party", new ArrayList<>());
 		extra.put("category", category);
 		extra.put("killCount", killCount);
 		extra.put("rarestProbability", rarestProbability);
