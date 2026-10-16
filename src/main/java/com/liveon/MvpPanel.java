@@ -6,7 +6,6 @@ import java.awt.Component;
 import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Font;
-import java.awt.GradientPaint;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridLayout;
@@ -30,14 +29,12 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 import javax.swing.BorderFactory;
-import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
 import javax.swing.JLabel;
 import javax.swing.JButton;
 import javax.swing.JPanel;
-import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.Scrollable;
 import javax.swing.JTabbedPane;
@@ -49,18 +46,16 @@ import net.runelite.client.util.ImageUtil;
 
 final class MvpPanel extends JPanel
 {
-	private static final Color GOLD = new Color(214, 174, 52);
-	private static final Color SILVER = new Color(170, 176, 185);
-	private static final Color BRONZE = new Color(190, 112, 48);
-	private static final Color DROP_GROUP_DARK = new Color(35, 35, 35);
-	private static final Color DROP_GROUP_LIGHT = new Color(44, 44, 44);
+	private static final Color GOLD = LiveOnTheme.GOLD;
+	private static final Color SILVER = LiveOnTheme.SILVER;
+	private static final Color BRONZE = LiveOnTheme.BRONZE;
 	private static final Color PANEL_BACKGROUND = new Color(36, 36, 36);
-	private static final Color NOTICE_BLUE = new Color(90, 190, 245);
+	private static final Color NOTICE_BLUE = LiveOnTheme.GREEN;
+	private static final Color MOVE_UP = new Color(126, 217, 87);
+	private static final Color MOVE_DOWN = new Color(224, 108, 117);
 	/** Rows shown per MVP ranking; older servers send ten and the panel shows what it gets. */
 	static final int TOP_SIZE = 25;
 	private static final Font META_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 11);
-	private static final Font SECTION_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 11);
-	private static final Font POSITION_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 12);
 	private static final Icon IRONMAN_ICON = officialIronIcon("ironman.png");
 	private static final Icon HARDCORE_IRONMAN_ICON = officialIronIcon("hardcore_ironman.png");
 	private static final Icon ULTIMATE_IRONMAN_ICON = officialIronIcon("ultimate_ironman.png");
@@ -79,6 +74,9 @@ final class MvpPanel extends JPanel
 	private MvpEfficiencyEntry liveOwnEhb;
 	private MvpEfficiencyEntry liveOwnEhp;
 	private String dropDataMonth;
+	private String ownPlayerName = "";
+	private boolean dropsReceived;
+	private boolean efficiencyReceived;
 	private String efficiencyDataMonth;
 	private String expandedDropPlayer;
 	private String expandedEhbPlayer;
@@ -97,12 +95,13 @@ final class MvpPanel extends JPanel
 		sections.addTab("EHP", createEfficiencySection("TOP " + TOP_SIZE + " • MVP EHP", ehpEntries, ehpOwnPosition));
 		configureSectionTabs(sections, dropIcon);
 		add(sections, BorderLayout.CENTER);
-		updateDropRanking(Collections.emptyList(), null);
+		renderDropRanking(Collections.emptyList(), null);
 	}
 
 	private static void configureSectionTabs(JTabbedPane sections, net.runelite.client.util.AsyncBufferedImage dropIcon)
 	{
 		sections.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
+		LiveOnTheme.styleTabs(sections, LiveOnTheme.ORANGE);
 		String[] titles = {"Drops", "EHB", "EHP"};
 		String[] icons = {"drop", "hammer", "bars"};
 		for (int index = 0; index < titles.length; index++)
@@ -128,21 +127,25 @@ final class MvpPanel extends JPanel
 			{
 				JButton label = (JButton) sections.getTabComponentAt(index);
 				boolean selected = index == sections.getSelectedIndex();
-				label.setForeground(selected ? new Color(255, 152, 0) : new Color(210, 210, 210));
-				// The tabbed pane already paints the active underline. A second border
-				// on the button made the same tab look selected twice.
-				label.setBorder(BorderFactory.createEmptyBorder(5, 3, 5, 3));
+				// The tab pane paints the rounded highlight and underline; the button only text.
+				LiveOnTheme.styleTabButton(label, selected, LiveOnTheme.ORANGE);
 			}
 		};
 		sections.addChangeListener(event -> update.run());
 		update.run();
 	}
 
+	private static final int ICON_SIZE = 14;
+	private static final int ICON_SUPERSAMPLE = 4;
+
 	private static javax.swing.Icon sectionIcon(String type)
 	{
-		java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(14, 14, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+		int scaled = ICON_SIZE * ICON_SUPERSAMPLE;
+		java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(scaled, scaled, java.awt.image.BufferedImage.TYPE_INT_ARGB);
 		java.awt.Graphics2D graphics = image.createGraphics();
 		graphics.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+		graphics.setRenderingHint(java.awt.RenderingHints.KEY_STROKE_CONTROL, java.awt.RenderingHints.VALUE_STROKE_PURE);
+		graphics.scale(ICON_SUPERSAMPLE, ICON_SUPERSAMPLE);
 		graphics.setColor(new Color(220, 170, 45));
 		graphics.setStroke(new java.awt.BasicStroke(1.5f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
 		if ("drop".equals(type))
@@ -163,7 +166,8 @@ final class MvpPanel extends JPanel
 			graphics.fillRect(10, 5, 2, 7);
 		}
 		graphics.dispose();
-		return new javax.swing.ImageIcon(image);
+		java.awt.Image downscaled = image.getScaledInstance(ICON_SIZE, ICON_SIZE, java.awt.Image.SCALE_AREA_AVERAGING);
+		return new javax.swing.ImageIcon(downscaled);
 	}
 
 	private JPanel createDropsSection()
@@ -218,27 +222,25 @@ final class MvpPanel extends JPanel
 
 	private JPanel createDropsHeader()
 	{
-		GradientPanel header = new GradientPanel(new Color(47, 44, 34), PANEL_BACKGROUND);
-		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-		header.setBorder(BorderFactory.createEmptyBorder(11, 12, 10, 12));
-		JLabel kicker = new JLabel("MVP DROPS");
-		kicker.setForeground(new Color(255, 176, 0));
-		kicker.setFont(kicker.getFont().deriveFont(Font.BOLD, 13f));
-		JLabel meta = new JLabel(monthLabel() + "  •  Drops de 1m+");
-		meta.setForeground(new Color(195, 195, 195));
-		meta.setFont(META_FONT);
-		kicker.setAlignmentX(Component.LEFT_ALIGNMENT);
-		meta.setAlignmentX(Component.LEFT_ALIGNMENT);
-		header.add(kicker);
-		header.add(Box.createVerticalStrut(3));
-		header.add(meta);
-		monthTotalLabel.setForeground(new Color(195, 195, 195));
-		monthTotalLabel.setFont(META_FONT);
-		monthTotalLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		JPanel header = new JPanel(new BorderLayout(6, 0));
+		header.setBackground(PANEL_BACKGROUND);
+		header.setBorder(BorderFactory.createEmptyBorder(10, 11, 4, 11));
+		header.setAlignmentX(Component.LEFT_ALIGNMENT);
+		JLabel meta = new JLabel(monthName() + " · 1m+");
+		meta.setForeground(LiveOnTheme.TEXT_MUTED);
+		meta.setFont(LiveOnTheme.small());
+		monthTotalLabel.setForeground(LiveOnTheme.TEXT_MUTED);
+		monthTotalLabel.setFont(LiveOnTheme.small());
 		monthTotalLabel.setVisible(false);
-		header.add(Box.createVerticalStrut(2));
-		header.add(monthTotalLabel);
+		header.add(meta, BorderLayout.CENTER);
+		header.add(monthTotalLabel, BorderLayout.EAST);
 		return header;
+	}
+
+	private static String monthName()
+	{
+		String name = clanMonth().getMonth().getDisplayName(TextStyle.FULL, new Locale("pt", "BR"));
+		return name.substring(0, 1).toUpperCase(new Locale("pt", "BR")) + name.substring(1);
 	}
 
 	private static JPanel createEfficiencySection(String titleText, JPanel entries, JPanel ownPosition)
@@ -271,28 +273,18 @@ final class MvpPanel extends JPanel
 
 	private static JPanel createEfficiencyHeader(String category)
 	{
-		GradientPanel header = new GradientPanel(new Color(47, 44, 34), PANEL_BACKGROUND);
-		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-		header.setBorder(BorderFactory.createEmptyBorder(11, 12, 10, 12));
-		JLabel kicker = new JLabel("MVP " + category);
-		kicker.setForeground(new Color(255, 176, 0));
-		kicker.setFont(kicker.getFont().deriveFont(Font.BOLD, 13f));
-		JLabel meta = new JLabel(monthLabel() + "  •  Wise Old Man");
-		meta.setForeground(new Color(195, 195, 195));
-		meta.setFont(META_FONT);
-		kicker.setAlignmentX(Component.LEFT_ALIGNMENT);
-		meta.setAlignmentX(Component.LEFT_ALIGNMENT);
-		header.add(kicker);
-		header.add(Box.createVerticalStrut(3));
-		header.add(meta);
+		JPanel header = new JPanel(new BorderLayout(6, 0));
+		header.setBackground(PANEL_BACKGROUND);
+		header.setBorder(BorderFactory.createEmptyBorder(10, 11, 4, 11));
+		JLabel meta = new JLabel(monthName() + " · ganhos no WOM");
+		meta.setForeground(LiveOnTheme.TEXT_MUTED);
+		meta.setFont(LiveOnTheme.small());
+		JLabel unit = new JLabel(category);
+		unit.setForeground(LiveOnTheme.TEXT_MUTED);
+		unit.setFont(LiveOnTheme.small());
+		header.add(meta, BorderLayout.CENTER);
+		header.add(unit, BorderLayout.EAST);
 		return header;
-	}
-
-	private static String monthLabel()
-	{
-		YearMonth month = clanMonth();
-		String name = month.getMonth().getDisplayName(TextStyle.FULL, new Locale("pt", "BR"));
-		return name.substring(0, 1).toUpperCase(new Locale("pt", "BR")) + name.substring(1) + " de " + month.getYear();
 	}
 
 	void setMonthTotal(long total)
@@ -309,13 +301,15 @@ final class MvpPanel extends JPanel
 	static String monthTotalText(long total)
 	{
 		if (total <= 0) return null;
-		return "<html>Total do clan no mês: <font color='#a6e22e'>" + formatValue(total) + "</font></html>";
+		return "<html>Total do mês: <font color='" + LiveOnTheme.hex(LiveOnTheme.TEXT) + "'>" + formatValue(total)
+			+ "</font></html>";
 	}
 
 	synchronized void updateDropRanking(List<MvpDropEntry> ranking, MvpDropEntry own)
 	{
 		List<MvpDropEntry> updatedRanking = ranking == null
 			? Collections.emptyList() : new ArrayList<>(ranking);
+		dropsReceived = true;
 		String month = clanMonth().toString();
 		if (month.equals(dropDataMonth) && updatedRanking.equals(liveRanking)
 			&& Objects.equals(own, liveOwnDrop)) return;
@@ -342,35 +336,29 @@ final class MvpPanel extends JPanel
 			if (topTen.isEmpty())
 			{
 				JLabel empty = new JLabel("Nenhum drop de 1m+ registrado.", SwingConstants.CENTER);
-				empty.setForeground(new Color(160, 160, 160));
+				empty.setForeground(LiveOnTheme.TEXT_MUTED);
 				empty.setBorder(BorderFactory.createEmptyBorder(24, 4, 4, 4));
 				dropEntries.add(empty);
 			}
 			else
 			{
 				long leaderValue = Math.max(1L, topTen.get(0).getTotalValue());
-				dropEntries.add(createDropLeader(topTen.get(0), leaderValue));
-				dropEntries.add(Box.createRigidArea(new Dimension(0, 7)));
+				dropEntries.add(createDropLeader(topTen.get(0), topTen.size() > 1 ? topTen.get(1) : null));
 				if (topTen.size() > 1)
 				{
-					for (int index = 1; index < Math.min(3, topTen.size()); index++)
+					dropEntries.add(dropSectionLabel("Ranking"));
+					JPanel list = new JPanel();
+					list.setLayout(new BoxLayout(list, BoxLayout.Y_AXIS));
+					list.setBackground(LiveOnTheme.CARD);
+					list.setAlignmentX(Component.LEFT_ALIGNMENT);
+					// Round the card before adding rows: roundCard clears child backgrounds, and the
+					// rows paint their own hover/expanded highlight.
+					LiveOnTheme.roundCard(list, new java.awt.Insets(3, 3, 3, 3));
+					for (int index = 1; index < topTen.size(); index++)
 					{
-						dropEntries.add(createDropPodium(index + 1, topTen.get(index), index == 1 ? SILVER : BRONZE));
-						if (index + 1 < Math.min(3, topTen.size()))
-						{
-							dropEntries.add(Box.createRigidArea(new Dimension(0, 5)));
-						}
+						list.add(createDropRow(index + 1, topTen.get(index), leaderValue));
 					}
-					dropEntries.add(Box.createRigidArea(new Dimension(0, 11)));
-				}
-				if (topTen.size() > 3)
-				{
-					addRankingDivider(dropEntries);
-					for (int index = 3; index < topTen.size(); index++)
-					{
-						dropEntries.add(createDropListRow(index + 1, topTen.get(index), leaderValue));
-						if (index + 1 < topTen.size()) dropEntries.add(Box.createVerticalStrut(3));
-					}
+					dropEntries.add(list);
 				}
 			}
 			renderOwnDropFooter(own);
@@ -386,6 +374,7 @@ final class MvpPanel extends JPanel
 			? Collections.emptyList() : new ArrayList<>(ehb);
 		List<MvpEfficiencyEntry> updatedEhp = ehp == null
 			? Collections.emptyList() : new ArrayList<>(ehp);
+		efficiencyReceived = true;
 		String month = clanMonth().toString();
 		if (month.equals(efficiencyDataMonth) && updatedEhb.equals(liveEhbRanking)
 			&& updatedEhp.equals(liveEhpRanking) && Objects.equals(ownEhb, liveOwnEhb)
@@ -404,129 +393,76 @@ final class MvpPanel extends JPanel
 	private void renderEfficiencyRanking(JPanel target, List<MvpEfficiencyEntry> ranking,
 		MvpEfficiencyEntry own, String metricType)
 	{
-		List<MvpEfficiencyEntry> topTen = ranking == null
+		List<MvpEfficiencyEntry> top = ranking == null
 			? Collections.emptyList()
 			: ranking.subList(0, Math.min(TOP_SIZE, ranking.size()));
 		SwingUtilities.invokeLater(() ->
 		{
 			target.removeAll();
-			if (topTen.isEmpty())
+			if (top.isEmpty())
 			{
 				JLabel empty = new JLabel("Nenhum ganho mensal disponível no WOM.", SwingConstants.CENTER);
-				empty.setForeground(new Color(160, 160, 160));
+				empty.setForeground(LiveOnTheme.TEXT_MUTED);
 				empty.setBorder(BorderFactory.createEmptyBorder(24, 4, 4, 4));
 				target.add(empty);
 			}
 			else
 			{
-				double leaderValue = Math.max(0.0001d, topTen.get(0).getGained());
-				target.add(createEfficiencyGroup(createEfficiencyLeader(topTen.get(0), leaderValue,
-					metricType, isEfficiencyExpanded(topTen.get(0), metricType)), topTen.get(0), metricType,
-					new Color(41, 38, 29), 34));
-				target.add(Box.createRigidArea(new Dimension(0, 7)));
-				if (topTen.size() > 1)
+				double leaderValue = Math.max(0.0001d, top.get(0).getGained());
+				target.add(createEfficiencyLeader(top.get(0), top.size() > 1 ? top.get(1) : null, metricType));
+				if (top.size() > 1)
 				{
-					JPanel podium = new JPanel();
-					podium.setLayout(new BoxLayout(podium, BoxLayout.Y_AXIS));
-					podium.setOpaque(false);
-					podium.setAlignmentX(Component.LEFT_ALIGNMENT);
-					podium.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
-					podium.add(createEfficiencyGroup(createEfficiencyPodium(2, topTen.get(1), SILVER,
-						isEfficiencyExpanded(topTen.get(1), metricType)), topTen.get(1), metricType,
-						new Color(43, 43, 43), 31));
-					if (topTen.size() > 2)
+					target.add(dropSectionLabel("Ranking"));
+					JPanel list = new JPanel();
+					list.setLayout(new BoxLayout(list, BoxLayout.Y_AXIS));
+					list.setBackground(LiveOnTheme.CARD);
+					list.setAlignmentX(Component.LEFT_ALIGNMENT);
+					LiveOnTheme.roundCard(list, new java.awt.Insets(3, 3, 3, 3));
+					for (int index = 1; index < top.size(); index++)
 					{
-						podium.add(Box.createVerticalStrut(5));
-						podium.add(createEfficiencyGroup(createEfficiencyPodium(3, topTen.get(2), BRONZE,
-							isEfficiencyExpanded(topTen.get(2), metricType)), topTen.get(2), metricType,
-							new Color(43, 43, 43), 31));
+						list.add(createEfficiencyRow(index + 1, top.get(index), leaderValue, metricType));
 					}
-					target.add(podium);
-					target.add(Box.createRigidArea(new Dimension(0, 11)));
-				}
-				if (topTen.size() > 3)
-				{
-					addRankingDivider(target);
-					for (int index = 3; index < topTen.size(); index++)
-					{
-						target.add(createEfficiencyGroup(createEfficiencyListRow(index + 1, topTen.get(index), true,
-							isEfficiencyExpanded(topTen.get(index), metricType)), topTen.get(index), metricType,
-							dropGroupBackground(index + 1), 31));
-						if (index + 1 < topTen.size()) target.add(Box.createVerticalStrut(3));
-					}
+					target.add(list);
 				}
 			}
 			JPanel footer = "EHB".equals(metricType) ? ehbOwnPosition : ehpOwnPosition;
-			renderOwnEfficiencyFooter(footer, own);
+			renderOwnEfficiencyFooter(footer, own, metricType);
 			target.revalidate();
 			target.repaint();
 		});
 	}
 
-	private static JPanel createEfficiencyLeader(MvpEfficiencyEntry entry, double leaderValue, String metricType,
-		boolean expanded)
-	{
-		GradientPanel row = new GradientPanel(new Color(58, 47, 22), new Color(41, 38, 29));
-		row.setLayout(new BorderLayout(8, 6));
-		row.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, GOLD),
-			BorderFactory.createEmptyBorder(10, 9, 9, 9)));
-		row.setAlignmentX(Component.LEFT_ALIGNMENT);
-		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 82));
-		JLabel crown = new JLabel("♛", SwingConstants.CENTER);
-		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 20f));
-		crown.setForeground(GOLD);
-		crown.setPreferredSize(new Dimension(25, 30));
-		applyLeaderPositionChange(crown, entry.getPositionChange());
-		row.add(crown, BorderLayout.WEST);
-		JLabel name = new JLabel(entry.getPlayerName() + (expanded ? "  ▾" : "  ›"));
-		applyAccountIcon(name, entry.getAccountType());
-		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
-		JLabel caption = new JLabel("Líder do mês");
-		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 15f));
-		caption.setForeground(new Color(180, 161, 110));
-		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
-		identity.setOpaque(false);
-		identity.add(name);
-		identity.add(caption);
-		JLabel value = new JLabel(formatHours(entry.getGained()), SwingConstants.RIGHT);
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
-		value.setForeground(GOLD);
-		JPanel header = new JPanel(new BorderLayout(5, 0));
-		header.setOpaque(false);
-		header.add(identity, BorderLayout.CENTER);
-		header.add(value, BorderLayout.EAST);
-		JPanel content = new JPanel();
-		content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
-		content.setOpaque(false);
-		content.add(header);
-		row.add(content, BorderLayout.CENTER);
-		JProgressBar progress = new JProgressBar(0, 1000);
-		progress.setValue((int) Math.min(1000d, entry.getGained() * 1000d / leaderValue));
-		progress.setForeground(GOLD);
-		progress.setBackground(new Color(74, 68, 54));
-		progress.setBorderPainted(false);
-		progress.setPreferredSize(new Dimension(10, 3));
-		row.add(progress, BorderLayout.SOUTH);
-		return row;
-	}
-
-	private JPanel createEfficiencyGroup(JPanel row, MvpEfficiencyEntry entry, String metricType,
-		Color background, int leftPadding)
+	private JPanel createEfficiencyLeader(MvpEfficiencyEntry entry, MvpEfficiencyEntry second, String metricType)
 	{
 		boolean expanded = isEfficiencyExpanded(entry, metricType);
-		JPanel wrapper = new JPanel(new BorderLayout());
-		wrapper.setBackground(background);
-		wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
-		int rowHeight = Math.min(82, row.getMaximumSize().height);
-		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? rowHeight + 83 : rowHeight));
-		wrapper.add(row, BorderLayout.NORTH);
+		double lead = second == null ? 0 : entry.getGained() - second.getGained();
+		JPanel card = createLeaderCard(entry.getPlayerName(), entry.getAccountType(), entry.getPositionChange(),
+			formatHours(entry.getGained()), lead > 0 ? "+" + formatHours(lead) + " à frente" : null);
 		if (expanded)
 		{
-			wrapper.add(createEfficiencyDetails(entry, metricType, background, leftPadding), BorderLayout.CENTER);
+			card.add(createEfficiencyDetails(entry, metricType, LiveOnTheme.GOLD_SOFT, 26), BorderLayout.CENTER);
 		}
-		makeEfficiencyGroupClickable(wrapper, entry, metricType);
-		return wrapper;
+		makeEfficiencyGroupClickable(card, entry, metricType, efficiencyHint(metricType, expanded, false));
+		LiveOnTheme.roundCard(card, GOLD, new java.awt.Insets(9, 8, 9, 10));
+		return card;
+	}
+
+	private JPanel createEfficiencyRow(int position, MvpEfficiencyEntry entry, double leaderValue, String metricType)
+	{
+		boolean expanded = isEfficiencyExpanded(entry, metricType);
+		DropRow row = new DropRow(Math.min(1d, entry.getGained() / leaderValue), expanded);
+		row.add(createRankingSummary(position, entry.getPlayerName(), entry.getAccountType(),
+			entry.getPositionChange(), formatHours(entry.getGained()), placeColor(position), LiveOnTheme.TEXT),
+			BorderLayout.NORTH);
+		if (expanded)
+		{
+			JPanel details = createEfficiencyDetails(entry, metricType, LiveOnTheme.CARD_HOVER, 55);
+			details.setOpaque(false);
+			row.add(details, BorderLayout.CENTER);
+		}
+		makeEfficiencyGroupClickable(row, entry, metricType, efficiencyHint(metricType, expanded, false));
+		addHoverHighlight(row, row);
+		return row;
 	}
 
 	private static JPanel createEfficiencyDetails(MvpEfficiencyEntry entry, String metricType,
@@ -535,19 +471,26 @@ final class MvpPanel extends JPanel
 		JPanel details = new JPanel();
 		details.setLayout(new BoxLayout(details, BoxLayout.Y_AXIS));
 		details.setBackground(background);
-		details.setBorder(BorderFactory.createEmptyBorder(5, leftPadding, 8, 6));
-		MvpEfficiencyContribution[] breakdown = entry.getBreakdown();
-		if (breakdown == null || breakdown.length == 0)
+		details.setBorder(BorderFactory.createEmptyBorder(5, leftPadding, 8, 10));
+		// Gains under 0.05h would show as "+0.0h"; drop them so a tiny month reads the same as an empty one.
+		List<MvpEfficiencyContribution> shown = new ArrayList<>();
+		if (entry.getBreakdown() != null)
 		{
-			JLabel unavailable = new JLabel("Detalhes ainda indisponíveis");
+			for (MvpEfficiencyContribution contribution : entry.getBreakdown())
+			{
+				if (contribution.getGained() >= 0.05d && shown.size() < 5) shown.add(contribution);
+			}
+		}
+		if (shown.isEmpty())
+		{
+			JLabel unavailable = new JLabel("Sem ganhos neste mês");
 			unavailable.setFont(META_FONT);
-			unavailable.setForeground(new Color(205, 205, 205));
+			unavailable.setForeground(LiveOnTheme.TEXT_MUTED);
 			details.add(unavailable);
 			return details;
 		}
-		for (int index = 0; index < Math.min(5, breakdown.length); index++)
+		for (MvpEfficiencyContribution contribution : shown)
 		{
-			MvpEfficiencyContribution contribution = breakdown[index];
 			JPanel line = new JPanel(new BorderLayout(4, 0));
 			line.setOpaque(false);
 			String label = metricLabel(contribution.getMetric());
@@ -555,9 +498,9 @@ final class MvpPanel extends JPanel
 			activity.setToolTipText(contribution.getMetric());
 			activity.setFont(META_FONT);
 			activity.setForeground(new Color(215, 215, 215));
-			JLabel hours = new JLabel(String.format(Locale.ROOT, "+%.2f %s", contribution.getGained(), metricType));
+			JLabel hours = new JLabel(String.format(Locale.ROOT, "+%.1fh", contribution.getGained()));
 			hours.setFont(META_FONT);
-			hours.setForeground(new Color(143, 201, 75));
+			hours.setForeground(LiveOnTheme.GREEN);
 			line.add(activity, BorderLayout.CENTER);
 			line.add(hours, BorderLayout.EAST);
 			line.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -593,7 +536,8 @@ final class MvpPanel extends JPanel
 		}
 	}
 
-	private void makeEfficiencyGroupClickable(Component component, MvpEfficiencyEntry entry, String metricType)
+	private void makeEfficiencyGroupClickable(Component component, MvpEfficiencyEntry entry, String metricType,
+		String hint)
 	{
 		if (component instanceof javax.swing.JComponent)
 		{
@@ -601,7 +545,7 @@ final class MvpPanel extends JPanel
 			clickable.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 			if (clickable.getToolTipText() == null)
 			{
-				clickable.setToolTipText("Exibir as cinco maiores contribuições");
+				clickable.setToolTipText(hint);
 			}
 			clickable.addMouseListener(new MouseAdapter()
 			{
@@ -615,7 +559,7 @@ final class MvpPanel extends JPanel
 		{
 			for (Component child : ((java.awt.Container) component).getComponents())
 			{
-				makeEfficiencyGroupClickable(child, entry, metricType);
+				makeEfficiencyGroupClickable(child, entry, metricType, hint);
 			}
 		}
 	}
@@ -637,154 +581,97 @@ final class MvpPanel extends JPanel
 		return shortName(label.toString(), 20);
 	}
 
-	private static JPanel createEfficiencyPodium(int position, MvpEfficiencyEntry entry, Color accent,
-		boolean expanded)
+	private JPanel createOwnEfficiencyRow(MvpEfficiencyEntry entry, String metricType)
 	{
-		JPanel card = new JPanel(new BorderLayout(7, 0));
-		card.setBackground(new Color(43, 43, 43));
-		card.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, accent),
-			BorderFactory.createEmptyBorder(7, 8, 7, 8)));
-		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 61));
-		JLabel place = new JLabel(position + "º");
-		stylePositionLabel(place);
-		applyPositionChange(place, entry.getPositionChange());
-		JLabel name = new JLabel(shortName(entry.getPlayerName(), 15) + (expanded ? "  ▾" : "  ›"));
-		name.setToolTipText(entry.getPlayerName());
-		applyAccountIcon(name, entry.getAccountType());
-		name.setForeground(new Color(225, 225, 225));
-		name.setFont(name.getFont().deriveFont(Font.BOLD, 15f));
-		JLabel value = new JLabel(formatHours(entry.getGained()), SwingConstants.RIGHT);
-		value.setForeground(accent);
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 13f));
-		card.add(place, BorderLayout.WEST);
-		card.add(name, BorderLayout.CENTER);
-		card.add(value, BorderLayout.EAST);
+		JPanel card = createOwnCard(createRankingSummary(entry.getPosition(), entry.getPlayerName(),
+			entry.getAccountType(), entry.getPositionChange(), formatHours(entry.getGained()),
+			LiveOnTheme.GREEN, LiveOnTheme.GREEN));
+		if (isEfficiencyExpanded(entry, metricType))
+		{
+			card.add(createEfficiencyDetails(entry, metricType, LiveOnTheme.GREEN_SOFT,
+				37 + placeWidth(entry.getPosition())), BorderLayout.CENTER);
+		}
+		makeEfficiencyGroupClickable(card, entry, metricType,
+			efficiencyHint(metricType, isEfficiencyExpanded(entry, metricType), true));
+		LiveOnTheme.roundCard(card, LiveOnTheme.GREEN, new java.awt.Insets(7, 3, 7, 8));
 		return card;
 	}
 
-	private static JPanel createEfficiencyListRow(int position, MvpEfficiencyEntry entry,
-		boolean expandable, boolean expanded)
+	private JPanel createOwnDropRow(MvpDropEntry entry)
 	{
-		Color background = dropGroupBackground(position);
-		JPanel row = new JPanel(new BorderLayout(7, 0));
-		row.setBackground(background);
-		row.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 2, 0, 0, new Color(82, 82, 82)),
-			BorderFactory.createEmptyBorder(9, 5, 9, 7)));
-		row.setAlignmentX(Component.LEFT_ALIGNMENT);
-		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-		JLabel place = new JLabel(Integer.toString(position), SwingConstants.CENTER);
-		stylePositionLabel(place);
-		applyPositionChange(place, entry.getPositionChange());
-		JLabel name = new JLabel(entry.getPlayerName() + (expandable ? (expanded ? "  ▾" : "  ›") : ""));
-		name.setToolTipText(entry.getPlayerName());
-		applyAccountIcon(name, entry.getAccountType());
-		name.setForeground(new Color(225, 225, 225));
-		name.setFont(name.getFont().deriveFont(Font.BOLD, 15f));
-		JLabel value = new JLabel(formatHours(entry.getGained()));
-		value.setForeground(new Color(205, 205, 205));
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
-		JPanel identity = new JPanel();
-		identity.setLayout(new BoxLayout(identity, BoxLayout.Y_AXIS));
-		identity.setOpaque(false);
-		name.setAlignmentX(Component.LEFT_ALIGNMENT);
-		value.setAlignmentX(Component.LEFT_ALIGNMENT);
-		identity.add(name);
-		identity.add(Box.createVerticalStrut(2));
-		identity.add(value);
-		row.add(place, BorderLayout.WEST);
-		row.add(identity, BorderLayout.CENTER);
-		return row;
+		JPanel card = createOwnCard(createRankingSummary(entry.getPosition(), entry.getPlayerName(),
+			entry.getAccountType(), entry.getPositionChange(), formatValue(entry.getTotalValue()),
+			LiveOnTheme.GREEN, LiveOnTheme.GREEN));
+		if (isDropExpanded(entry.getPlayerName()))
+		{
+			card.add(createInlineDropDetails(entry, LiveOnTheme.GREEN_SOFT,
+				37 + placeWidth(entry.getPosition())), BorderLayout.CENTER);
+		}
+		makeDropGroupClickable(card, entry, dropHint(isDropExpanded(entry.getPlayerName()), true));
+		LiveOnTheme.roundCard(card, LiveOnTheme.GREEN, new java.awt.Insets(7, 3, 7, 8));
+		return card;
 	}
 
-	private static JPanel createOwnEfficiencyRow(MvpEfficiencyEntry entry)
+	/** "Sua posição" for someone absent from the ranking: no position, current name, zero value, not clickable. */
+	private JPanel createOwnPlaceholder(String zeroText)
 	{
-		JPanel row = createEfficiencyListRow(entry.getPosition(), entry, false, false);
-		row.setBackground(new Color(34, 48, 57));
-		row.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, NOTICE_BLUE),
-			BorderFactory.createEmptyBorder(9, 5, 9, 7)));
-		return row;
+		JPanel summary = createRankingSummary(0, ownPlayerName, null, 0, zeroText, LiveOnTheme.GREEN, LiveOnTheme.GREEN);
+		JPanel card = createOwnCard(summary);
+		LiveOnTheme.roundCard(card, LiveOnTheme.GREEN, new java.awt.Insets(7, 3, 7, 8));
+		return card;
 	}
 
-	private static JPanel createOwnDropRow(MvpDropEntry entry)
+	void setOwnPlayerName(String playerName)
 	{
-		JPanel row = new JPanel(new BorderLayout(7, 0));
-		row.setBackground(new Color(34, 48, 57));
-		row.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, NOTICE_BLUE),
-			BorderFactory.createEmptyBorder(9, 5, 9, 7)));
-		row.setAlignmentX(Component.LEFT_ALIGNMENT);
-		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-		JLabel place = new JLabel(Integer.toString(entry.getPosition()), SwingConstants.CENTER);
-		stylePositionLabel(place);
-		applyPositionChange(place, entry.getPositionChange());
-		JLabel name = new JLabel(entry.getPlayerName());
-		name.setToolTipText(entry.getPlayerName());
-		applyAccountIcon(name, entry.getAccountType());
-		name.setForeground(new Color(225, 225, 225));
-		name.setFont(name.getFont().deriveFont(Font.BOLD, 15f));
-		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
-		value.setForeground(new Color(205, 205, 205));
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
-		JPanel identity = new JPanel();
-		identity.setLayout(new BoxLayout(identity, BoxLayout.Y_AXIS));
-		identity.setOpaque(false);
-		name.setAlignmentX(Component.LEFT_ALIGNMENT);
-		value.setAlignmentX(Component.LEFT_ALIGNMENT);
-		identity.add(name);
-		identity.add(Box.createVerticalStrut(2));
-		identity.add(value);
-		row.add(place, BorderLayout.WEST);
-		row.add(identity, BorderLayout.CENTER);
-		return row;
+		String name = playerName == null ? "" : playerName.trim();
+		if (name.equals(ownPlayerName)) return;
+		ownPlayerName = name;
+		renderDropRanking(liveRanking, liveOwnDrop);
+		renderEfficiencyRanking(ehbEntries, liveEhbRanking, liveOwnEhb, "EHB");
+		renderEfficiencyRanking(ehpEntries, liveEhpRanking, liveOwnEhp, "EHP");
+	}
+
+	private static JPanel createOwnCard(JPanel summary)
+	{
+		summary.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 0));
+		JPanel card = new JPanel(new BorderLayout());
+		card.setBackground(LiveOnTheme.GREEN_SOFT);
+		card.setAlignmentX(Component.LEFT_ALIGNMENT);
+		card.add(summary, BorderLayout.NORTH);
+		return card;
 	}
 
 	private void renderOwnDropFooter(MvpDropEntry own)
 	{
 		dropOwnPosition.removeAll();
-		boolean visible = own != null && own.getPosition() > 0;
+		// Players with no 1m+ drop this month are absent from the ranking; still pin their row, at zero.
+		boolean placeholder = own == null && dropsReceived && !ownPlayerName.isEmpty();
+		boolean visible = placeholder || (own != null && own.getPosition() > 0);
 		if (visible)
 		{
-			addOwnDivider(dropOwnPosition);
-			dropOwnPosition.add(createOwnDropRow(own));
+			dropOwnPosition.add(dropSectionLabel("Sua posição"));
+			dropOwnPosition.add(own != null ? createOwnDropRow(own) : createOwnPlaceholder(formatValue(0)));
 		}
 		dropOwnPosition.setVisible(visible);
 		dropOwnPosition.revalidate();
 		dropOwnPosition.repaint();
 	}
 
-	private static void renderOwnEfficiencyFooter(JPanel footer, MvpEfficiencyEntry own)
+	private void renderOwnEfficiencyFooter(JPanel footer, MvpEfficiencyEntry own, String metricType)
 	{
 		footer.removeAll();
-		boolean visible = own != null && own.getPosition() > 0;
+		// Newer servers also send "own" for players with no gain this month (position 0); older ones
+		// send null, so fall back to a zero row once the rankings have arrived.
+		boolean placeholder = own == null && efficiencyReceived && !ownPlayerName.isEmpty();
+		boolean visible = placeholder || own != null;
 		if (visible)
 		{
-			addOwnDivider(footer);
-			footer.add(createOwnEfficiencyRow(own));
+			footer.add(dropSectionLabel("Sua posição"));
+			footer.add(own != null ? createOwnEfficiencyRow(own, metricType) : createOwnPlaceholder(formatHours(0)));
 		}
 		footer.setVisible(visible);
 		footer.revalidate();
 		footer.repaint();
-	}
-
-	private static void addOwnDivider(JPanel target)
-	{
-		target.add(Box.createVerticalStrut(12));
-		javax.swing.JSeparator separator = new javax.swing.JSeparator();
-		separator.setForeground(new Color(72, 72, 72));
-		separator.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
-		separator.setAlignmentX(Component.LEFT_ALIGNMENT);
-		target.add(separator);
-		target.add(Box.createVerticalStrut(7));
-		JLabel label = new JLabel("SUA POSIÇÃO");
-		label.setForeground(NOTICE_BLUE);
-		label.setFont(SECTION_FONT);
-		label.setBorder(BorderFactory.createEmptyBorder(0, 4, 6, 0));
-		label.setAlignmentX(Component.LEFT_ALIGNMENT);
-		target.add(label);
 	}
 
 	private synchronized void applyDropPositionChanges(List<MvpDropEntry> ranking, MvpDropEntry own)
@@ -895,70 +782,10 @@ final class MvpPanel extends JPanel
 		catch (NumberFormatException ignored) { return 0; }
 	}
 
-	private static void stylePositionLabel(JLabel label)
-	{
-		label.setHorizontalAlignment(SwingConstants.CENTER);
-		label.setForeground(new Color(175, 175, 175));
-		label.setFont(POSITION_FONT);
-		label.setPreferredSize(new Dimension(30, 20));
-	}
-
-	private static void applyPositionChange(JLabel label, int change)
-	{
-		if (change == 0) return;
-		String color = change > 0 ? "#7ED957" : "#E06C75";
-		String arrow = change > 0 ? "▲" : "▼";
-		label.setText("<html><div style='text-align:center'>" + label.getText() + "<br><font color='" + color + "'>"
-			+ arrow + " " + Math.abs(change) + "</font></div></html>");
-		int width = Math.max(30, label.getFontMetrics(POSITION_FONT).stringWidth(arrow + " " + Math.abs(change)) + 2);
-		label.setPreferredSize(new Dimension(width, 32));
-	}
-
-	private static void applyLeaderPositionChange(JLabel label, int change)
-	{
-		if (change == 0) return;
-		String color = change > 0 ? "#7ED957" : "#E06C75";
-		String arrow = change > 0 ? "▲" : "▼";
-		label.setText("<html><div style='text-align:center'>♛<br><font color='" + color + "'>"
-			+ arrow + Math.abs(change) + "</font></div></html>");
-		label.setPreferredSize(new Dimension(34, 38));
-	}
-
-	private static void addRankingDivider(JPanel target)
-	{
-		javax.swing.JSeparator separator = new javax.swing.JSeparator();
-		separator.setForeground(new Color(72, 72, 72));
-		separator.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
-		separator.setAlignmentX(Component.LEFT_ALIGNMENT);
-		target.add(separator);
-		target.add(Box.createVerticalStrut(7));
-	}
-
 	private static String shortName(String value, int length)
 	{
 		if (value == null) return "";
 		return value.length() <= length ? value : value.substring(0, Math.max(1, length - 1)) + "…";
-	}
-
-	private static final class GradientPanel extends JPanel
-	{
-		private final Color start;
-		private final Color end;
-		private GradientPanel(Color start, Color end)
-		{
-			this.start = start;
-			this.end = end;
-			setOpaque(false);
-		}
-		@Override protected void paintComponent(Graphics graphics)
-		{
-			Graphics2D copy = (Graphics2D) graphics.create();
-			copy.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-			copy.setPaint(new GradientPaint(0, 0, start, getWidth(), getHeight(), end));
-			copy.fillRect(0, 0, getWidth(), getHeight());
-			copy.dispose();
-			super.paintComponent(graphics);
-		}
 	}
 
 	/** Keeps ranking cards pinned to the sidebar width instead of their text width. */
@@ -992,157 +819,240 @@ final class MvpPanel extends JPanel
 
 	private static String formatHours(double value)
 	{
-		return String.format(Locale.ROOT, "%.2f h", value);
+		return String.format(Locale.ROOT, "%.1fh", value);
 	}
 
-	private JPanel createDropLeader(MvpDropEntry entry, long leaderValue)
+	private JPanel createDropLeader(MvpDropEntry entry, MvpDropEntry second)
 	{
-		boolean expanded = normalizePlayer(entry.getPlayerName()).equals(expandedDropPlayer);
-		GradientPanel card = new GradientPanel(new Color(58, 47, 22), new Color(41, 38, 29));
-		card.setLayout(new BorderLayout(8, 6));
-		card.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, GOLD),
-			BorderFactory.createEmptyBorder(10, 9, 9, 9)));
+		boolean expanded = isDropExpanded(entry.getPlayerName());
+		long lead = second == null ? 0 : entry.getTotalValue() - second.getTotalValue();
+		JPanel card = createLeaderCard(entry.getPlayerName(), entry.getAccountType(), entry.getPositionChange(),
+			formatValue(entry.getTotalValue()), lead > 0 ? "+" + formatValue(lead) + " à frente" : null);
+		if (expanded)
+		{
+			card.add(createInlineDropDetails(entry, LiveOnTheme.GOLD_SOFT, 26), BorderLayout.CENTER);
+		}
+		makeDropGroupClickable(card, entry, dropHint(expanded, false));
+		LiveOnTheme.roundCard(card, GOLD, new java.awt.Insets(9, 8, 9, 10));
+		return card;
+	}
+
+	/** Crown, name with movement, value and lead over the 2nd place; callers add details and round it. */
+	private static JPanel createLeaderCard(String playerName, String accountType, int change, String valueText,
+		String leadText)
+	{
+		JPanel card = new JPanel(new BorderLayout(0, 6));
+		card.setBackground(LiveOnTheme.GOLD_SOFT);
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 184 : 82));
+		JPanel summary = new JPanel(new BorderLayout(8, 0));
 		JLabel crown = new JLabel("♛", SwingConstants.CENTER);
-		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 20f));
+		crown.setFont(crown.getFont().deriveFont(Font.BOLD, 18f));
 		crown.setForeground(GOLD);
-		crown.setPreferredSize(new Dimension(25, 30));
-		applyLeaderPositionChange(crown, entry.getPositionChange());
-		card.add(crown, BorderLayout.WEST);
-		JLabel name = new JLabel(entry.getPlayerName() + (expanded ? "  ▾" : "  ›"));
-		applyAccountIcon(name, entry.getAccountType());
-		name.setFont(name.getFont().deriveFont(Font.BOLD, 16f));
+		JLabel name = new JLabel(shortName(playerName, 16));
+		name.setToolTipText(playerName);
+		applyAccountIcon(name, accountType);
+		name.setForeground(LiveOnTheme.TEXT);
+		name.setFont(LiveOnTheme.bold());
 		JLabel caption = new JLabel("Líder do mês");
-		caption.setFont(caption.getFont().deriveFont(Font.BOLD, 15f));
-		caption.setForeground(new Color(180, 161, 110));
+		caption.setForeground(LiveOnTheme.TEXT_MUTED);
+		caption.setFont(LiveOnTheme.small());
+		JPanel badge = new JPanel(new GridLayout(0, 1, 0, 1));
+		badge.add(crown);
+		if (change != 0)
+		{
+			// Under the crown there is spare width; next to the caption it wrapped out of view.
+			JLabel movement = changeLabel(change);
+			movement.setHorizontalAlignment(SwingConstants.CENTER);
+			badge.add(movement);
+		}
 		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
-		identity.setOpaque(false);
 		identity.add(name);
 		identity.add(caption);
-		JLabel value = new JLabel(formatValue(entry.getTotalValue()), SwingConstants.RIGHT);
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
+		JLabel value = new JLabel(valueText, SwingConstants.RIGHT);
 		value.setForeground(GOLD);
-		JPanel leaderHeader = new JPanel(new BorderLayout(5, 0));
-		leaderHeader.setOpaque(false);
-		leaderHeader.add(identity, BorderLayout.CENTER);
-		leaderHeader.add(value, BorderLayout.EAST);
-		JPanel content = new JPanel(new BorderLayout(0, 6));
-		content.setOpaque(false);
-		content.add(leaderHeader, BorderLayout.NORTH);
-		if (expanded)
+		value.setFont(LiveOnTheme.bold());
+		JPanel totals = new JPanel(new GridLayout(0, 1, 0, 1));
+		totals.add(value);
+		if (leadText != null)
 		{
-			content.add(createInlineDropDetails(entry, new Color(41, 38, 29), 0), BorderLayout.CENTER);
+			JLabel ahead = new JLabel(leadText, SwingConstants.RIGHT);
+			ahead.setForeground(LiveOnTheme.TEXT_FAINT);
+			ahead.setFont(LiveOnTheme.small());
+			totals.add(ahead);
 		}
-		card.add(content, BorderLayout.CENTER);
-		JProgressBar progress = new JProgressBar(0, 1000);
-		progress.setValue((int) Math.min(1000L, entry.getTotalValue() * 1000L / leaderValue));
-		progress.setForeground(GOLD);
-		progress.setBackground(new Color(74, 68, 54));
-		progress.setBorderPainted(false);
-		progress.setPreferredSize(new Dimension(10, 3));
-		card.add(progress, BorderLayout.SOUTH);
-		makeDropGroupClickable(card, entry);
-		return card;
-	}
-
-	private JPanel createDropPodium(int position, MvpDropEntry entry, Color accent)
-	{
-		Color background = dropGroupBackground(position);
-		boolean expanded = normalizePlayer(entry.getPlayerName()).equals(expandedDropPlayer);
-		JPanel card = new JPanel(new BorderLayout());
-		card.setBackground(background);
-		card.setBorder(BorderFactory.createMatteBorder(0, 3, 0, 0, accent));
-		card.setAlignmentX(Component.LEFT_ALIGNMENT);
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 184 : 61));
-		JPanel summary = new JPanel(new BorderLayout(7, 0));
-		summary.setBackground(background);
-		summary.setBorder(BorderFactory.createEmptyBorder(7, 8, 7, 8));
-		JLabel place = new JLabel(position + "º");
-		stylePositionLabel(place);
-		applyPositionChange(place, entry.getPositionChange());
-		JLabel name = clickableDropName(entry, 16, 15f);
-		name.setForeground(new Color(225, 225, 225));
-		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
-		value.setForeground(accent);
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 13f));
-		JPanel identity = new JPanel();
-		identity.setLayout(new BoxLayout(identity, BoxLayout.Y_AXIS));
-		identity.setOpaque(false);
-		name.setAlignmentX(Component.LEFT_ALIGNMENT);
-		value.setAlignmentX(Component.LEFT_ALIGNMENT);
-		identity.add(name);
-		identity.add(Box.createVerticalStrut(2));
-		identity.add(value);
-		summary.add(place, BorderLayout.WEST);
+		summary.add(badge, BorderLayout.WEST);
 		summary.add(identity, BorderLayout.CENTER);
+		summary.add(totals, BorderLayout.EAST);
 		card.add(summary, BorderLayout.NORTH);
-		if (expanded)
-		{
-			card.add(createInlineDropDetails(entry, background, 43), BorderLayout.CENTER);
-		}
-		makeDropGroupClickable(card, entry);
 		return card;
 	}
 
-	private JPanel createDropListRow(int position, MvpDropEntry entry, long leaderValue)
+	private static Color placeColor(int position)
 	{
-		Color groupBackground = dropGroupBackground(position);
-		boolean expanded = normalizePlayer(entry.getPlayerName()).equals(expandedDropPlayer);
-		JPanel wrapper = new JPanel(new BorderLayout());
-		wrapper.setBackground(groupBackground);
-		wrapper.setBorder(BorderFactory.createMatteBorder(0, 2, 0, 0, new Color(82, 82, 82)));
-		wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
-		wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, expanded ? 179 : 56));
-		JPanel row = new JPanel(new BorderLayout(7, 0));
-		row.setBackground(groupBackground);
-		row.setBorder(BorderFactory.createEmptyBorder(9, 5, 9, 7));
-		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-		JLabel place = new JLabel(Integer.toString(position), SwingConstants.CENTER);
-		stylePositionLabel(place);
-		applyPositionChange(place, entry.getPositionChange());
-		JLabel name = clickableDropName(entry, 16, 15f);
-		name.setForeground(new Color(225, 225, 225));
-		JLabel value = new JLabel(formatValue(entry.getTotalValue()));
-		value.setForeground(new Color(205, 205, 205));
-		value.setFont(value.getFont().deriveFont(Font.BOLD, 14f));
-		JPanel identity = new JPanel();
-		identity.setLayout(new BoxLayout(identity, BoxLayout.Y_AXIS));
-		identity.setOpaque(false);
-		name.setAlignmentX(Component.LEFT_ALIGNMENT);
-		value.setAlignmentX(Component.LEFT_ALIGNMENT);
-		identity.add(name);
-		identity.add(Box.createVerticalStrut(2));
-		identity.add(value);
-		row.add(place, BorderLayout.WEST);
-		row.add(identity, BorderLayout.CENTER);
-		wrapper.add(row, BorderLayout.NORTH);
+		return position == 2 ? SILVER : position == 3 ? BRONZE : LiveOnTheme.TEXT_MUTED;
+	}
+
+	private JPanel createDropRow(int position, MvpDropEntry entry, long leaderValue)
+	{
+		boolean expanded = isDropExpanded(entry.getPlayerName());
+		DropRow row = new DropRow(Math.min(1d, entry.getTotalValue() / (double) leaderValue), expanded);
+		row.add(createRankingSummary(position, entry.getPlayerName(), entry.getAccountType(),
+			entry.getPositionChange(), formatValue(entry.getTotalValue()), placeColor(position), LiveOnTheme.TEXT),
+			BorderLayout.NORTH);
 		if (expanded)
 		{
-			wrapper.add(createInlineDropDetails(entry, groupBackground, 34), BorderLayout.CENTER);
+			JPanel details = createInlineDropDetails(entry, LiveOnTheme.CARD_HOVER, 55);
+			details.setOpaque(false);
+			row.add(details, BorderLayout.CENTER);
 		}
-		makeDropGroupClickable(wrapper, entry);
-		return wrapper;
+		makeDropGroupClickable(row, entry, dropHint(expanded, false));
+		addHoverHighlight(row, row);
+		return row;
 	}
 
-	private static Color dropGroupBackground(int position)
+	/** Position, movement, name and value in fixed columns, shared by every ranking row and "Sua posição". */
+	private static JPanel createRankingSummary(int position, String playerName, String accountType, int change,
+		String valueText, Color placeColor, Color nameColor)
 	{
-		return position % 2 == 0 ? DROP_GROUP_LIGHT : DROP_GROUP_DARK;
+		JPanel summary = new JPanel(new BorderLayout(4, 0));
+		summary.setOpaque(false);
+		summary.setBorder(BorderFactory.createEmptyBorder(7, 4, 8, 8));
+		JLabel place = new JLabel(position > 0 ? Integer.toString(position) : "–", SwingConstants.RIGHT);
+		place.setForeground(placeColor);
+		place.setFont(LiveOnTheme.bold());
+		place.setPreferredSize(new Dimension(placeWidth(position), 16));
+		JLabel movement = changeLabel(change);
+		movement.setPreferredSize(new Dimension(26, 16));
+		JPanel left = new JPanel(new BorderLayout(3, 0));
+		left.setOpaque(false);
+		left.add(place, BorderLayout.WEST);
+		left.add(movement, BorderLayout.EAST);
+		JLabel name = new JLabel(shortName(playerName, 16));
+		name.setToolTipText(playerName);
+		applyAccountIcon(name, accountType);
+		name.setForeground(nameColor);
+		name.setFont(LiveOnTheme.regular());
+		JLabel value = new JLabel(valueText, SwingConstants.RIGHT);
+		value.setForeground(LiveOnTheme.TEXT);
+		value.setFont(LiveOnTheme.bold());
+		summary.add(left, BorderLayout.WEST);
+		summary.add(name, BorderLayout.CENTER);
+		summary.add(value, BorderLayout.EAST);
+		return summary;
 	}
 
-	private JLabel clickableDropName(MvpDropEntry entry, int length, float size)
+	/** Top-25 rows only need two digits; "Sua posição" can be 100+ and must not be cut to "...". */
+	private static int placeWidth(int position)
 	{
-		boolean expanded = normalizePlayer(entry.getPlayerName()).equals(expandedDropPlayer);
-		JLabel name = new JLabel(shortName(entry.getPlayerName(), length) + (expanded ? "  ▾" : "  ›"));
-		applyAccountIcon(name, entry.getAccountType());
-		name.setToolTipText(entry.getPlayerName());
-		name.setFont(name.getFont().deriveFont(Font.BOLD, size));
-		name.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-		return name;
+		return position >= 100 ? 26 : 18;
 	}
 
-	private void makeDropGroupClickable(Component component, MvpDropEntry entry)
+	private static JLabel changeLabel(int change)
+	{
+		JLabel label = new JLabel(change > 0 ? "▲ " + change : change < 0 ? "▼ " + Math.abs(change) : "•");
+		label.setFont(META_FONT);
+		label.setForeground(change > 0 ? MOVE_UP : change < 0 ? MOVE_DOWN : LiveOnTheme.TEXT_FAINT);
+		if (change != 0)
+		{
+			label.setToolTipText((change > 0 ? "Subiu " : "Caiu ") + Math.abs(change)
+				+ (Math.abs(change) == 1 ? " posição" : " posições"));
+		}
+		return label;
+	}
+
+	private static JLabel dropSectionLabel(String text)
+	{
+		JLabel label = new JLabel(text);
+		label.setForeground(LiveOnTheme.TEXT_MUTED);
+		label.setFont(LiveOnTheme.small());
+		label.setAlignmentX(Component.LEFT_ALIGNMENT);
+		label.setBorder(BorderFactory.createEmptyBorder(11, 4, 5, 0));
+		return label;
+	}
+
+	private static void addHoverHighlight(Component component, DropRow row)
+	{
+		component.addMouseListener(new MouseAdapter()
+		{
+			@Override public void mouseEntered(MouseEvent event) { row.setHover(true); }
+
+			@Override public void mouseExited(MouseEvent event)
+			{
+				// Moving onto a child label fires an exit on the parent; only clear when truly outside.
+				java.awt.Point point = SwingUtilities.convertPoint(event.getComponent(), event.getPoint(), row);
+				if (!row.contains(point)) row.setHover(false);
+			}
+		});
+		if (component instanceof java.awt.Container)
+		{
+			for (Component child : ((java.awt.Container) component).getComponents()) addHoverHighlight(child, row);
+		}
+	}
+
+	/** A ranking row: rounded highlight on hover/expanded, and a thin bar showing its share of the leader. */
+	private static final class DropRow extends JPanel
+	{
+		private final double share;
+		private final boolean expanded;
+		private boolean hover;
+
+		private DropRow(double share, boolean expanded)
+		{
+			super(new BorderLayout());
+			this.share = share;
+			this.expanded = expanded;
+			setOpaque(false);
+			setAlignmentX(Component.LEFT_ALIGNMENT);
+		}
+
+		private void setHover(boolean hover)
+		{
+			if (this.hover == hover) return;
+			this.hover = hover;
+			repaint();
+		}
+
+		@Override public Dimension getMaximumSize()
+		{
+			return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+		}
+
+		@Override protected void paintComponent(Graphics graphics)
+		{
+			Graphics2D g = (Graphics2D) graphics.create();
+			g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+			if (hover || expanded)
+			{
+				g.setColor(LiveOnTheme.CARD_HOVER);
+				g.fillRoundRect(0, 0, getWidth(), getHeight(), 8, 8);
+			}
+			int barY = getHeight() - 3;
+			int barWidth = Math.max(0, getWidth() - 16);
+			g.setColor(LiveOnTheme.DIVIDER);
+			g.fillRoundRect(8, barY, barWidth, 2, 2, 2);
+			g.setColor(LiveOnTheme.CARD_EDGE);
+			g.fillRoundRect(8, barY, (int) Math.round(barWidth * share), 2, 2, 2);
+			g.dispose();
+			super.paintComponent(graphics);
+		}
+	}
+
+	private static String dropHint(boolean expanded, boolean own)
+	{
+		if (expanded) return "Clique para fechar";
+		return own ? "Clique para ver seus 5 maiores drops" : "Clique para ver os 5 maiores drops";
+	}
+
+	private static String efficiencyHint(String metricType, boolean expanded, boolean own)
+	{
+		if (expanded) return "Clique para fechar";
+		if (own) return "Clique para ver seu resumo de " + metricType;
+		boolean bosses = "EHB".equals(metricType);
+		String subject = bosses ? "os bosses" : "as skills";
+		return "Clique para ver " + subject + " com mais horas";
+	}
+
+	private void makeDropGroupClickable(Component component, MvpDropEntry entry, String hint)
 	{
 		if (component instanceof javax.swing.JComponent)
 		{
@@ -1150,7 +1060,7 @@ final class MvpPanel extends JPanel
 			clickable.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 			if (clickable.getToolTipText() == null)
 			{
-				clickable.setToolTipText("Exibir os cinco maiores drops");
+				clickable.setToolTipText(hint);
 			}
 			clickable.addMouseListener(dropToggleListener(entry));
 		}
@@ -1158,7 +1068,7 @@ final class MvpPanel extends JPanel
 		{
 			for (Component child : ((java.awt.Container) component).getComponents())
 			{
-				makeDropGroupClickable(child, entry);
+				makeDropGroupClickable(child, entry, hint);
 			}
 		}
 	}
@@ -1218,7 +1128,7 @@ final class MvpPanel extends JPanel
 		if (drops == null || drops.length == 0)
 		{
 			JLabel unavailable = new JLabel("Top 5 ainda sem registros");
-			unavailable.setForeground(new Color(175, 175, 175));
+			unavailable.setForeground(LiveOnTheme.TEXT_MUTED);
 			unavailable.setFont(META_FONT);
 			unavailable.setHorizontalAlignment(SwingConstants.LEFT);
 			details.add(unavailable);

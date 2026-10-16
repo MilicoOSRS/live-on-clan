@@ -27,8 +27,8 @@ import javax.swing.SwingUtilities;
 
 final class PbPanel extends JPanel
 {
-	private static final Color ORANGE = new Color(255, 152, 0);
-	private static final Color BLUE = new Color(90, 190, 245);
+	private static final Color ORANGE = LiveOnTheme.ORANGE;
+	private static final Color BLUE = LiveOnTheme.GREEN;
 	private final javax.swing.JTextField globalSearch = new javax.swing.JTextField("Pesquisar");
 	private final JButton clearSearch = new JButton("×");
 	private final javax.swing.JPopupMenu searchSuggestions = new javax.swing.JPopupMenu();
@@ -100,7 +100,7 @@ final class PbPanel extends JPanel
 		top.add(searchRow);
 		top.add(Box.createVerticalStrut(6));
 		JLabel selectionLabel = new JLabel("Ou selecione nos menus abaixo");
-		selectionLabel.setForeground(new Color(145, 145, 145));
+		selectionLabel.setForeground(LiveOnTheme.TEXT_MUTED);
 		selectionLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
 		top.add(selectionLabel);
 		top.add(Box.createVerticalStrut(3));
@@ -124,7 +124,7 @@ final class PbPanel extends JPanel
 		top.add(raidsGroup);
 		top.add(Box.createVerticalStrut(6));
 		javax.swing.JSeparator categorySeparator = new javax.swing.JSeparator();
-		categorySeparator.setForeground(new Color(62, 62, 62));
+		categorySeparator.setForeground(LiveOnTheme.DIVIDER);
 		categorySeparator.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
 		categorySeparator.setAlignmentX(Component.LEFT_ALIGNMENT);
 		top.add(categorySeparator);
@@ -224,7 +224,7 @@ final class PbPanel extends JPanel
 	private static void configureSearchPrompt(javax.swing.JTextField field, String prompt)
 	{
 		Color normalColor = field.getForeground();
-		Color promptColor = new Color(145, 145, 145);
+		Color promptColor = LiveOnTheme.TEXT_MUTED;
 		field.addFocusListener(new java.awt.event.FocusAdapter()
 		{
 			@Override
@@ -260,7 +260,7 @@ final class PbPanel extends JPanel
 			if (value == null)
 			{
 				label.setText(prompt);
-				label.setForeground(new Color(155, 155, 155));
+				label.setForeground(LiveOnTheme.TEXT_MUTED);
 			}
 			return label;
 		});
@@ -376,7 +376,7 @@ final class PbPanel extends JPanel
 		else
 		{
 			globalSearch.setText("Pesquisar");
-			globalSearch.setForeground(new Color(145, 145, 145));
+			globalSearch.setForeground(LiveOnTheme.TEXT_MUTED);
 		}
 		updatingGlobalSearch = false;
 		clearSearch.setVisible(false);
@@ -779,8 +779,8 @@ final class PbPanel extends JPanel
 	private static String safe(String value) { return value == null ? "" : value; }
 	private static Color medalColor(int position)
 	{
-		return position == 1 ? new Color(235, 190, 45) : position == 2 ? new Color(175, 185, 190)
-			: position == 3 ? new Color(190, 110, 55) : new Color(70, 70, 70);
+		return position == 1 ? LiveOnTheme.GOLD : position == 2 ? LiveOnTheme.SILVER
+			: position == 3 ? LiveOnTheme.BRONZE : LiveOnTheme.CARD_EDGE;
 	}
 
 	private static ImageIcon medalIcon(int position)

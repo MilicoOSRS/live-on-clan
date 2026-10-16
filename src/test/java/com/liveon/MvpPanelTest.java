@@ -132,7 +132,7 @@ public class MvpPanelTest
 	{
 		org.junit.Assert.assertNull(MvpPanel.monthTotalText(0));
 		org.junit.Assert.assertEquals(
-			"<html>Total do clan no mês: <font color='#a6e22e'>12.40B</font></html>",
+			"<html>Total do mês: <font color='#e8e8e8'>12.40B</font></html>",
 			MvpPanel.monthTotalText(12_400_000_000L));
 	}
 }

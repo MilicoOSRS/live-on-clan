@@ -43,7 +43,7 @@ final class LiveOnPanel extends JPanel
 	private final JTextField rsn = new JTextField();
 	private final JTextField twitch = new JTextField();
 	private final JLabel status = new JLabel(" ");
-	private final JLabel pinnedNotice = new JLabel("<html><b>AVISOS</b><br><font color='#aaaaaa'>Nenhum aviso fixado.</font></html>");
+	private final JLabel pinnedNotice = new JLabel("<html><font color='#ff981f'>&#128204; Aviso</font><br><font color='#a0a0a0'>Nenhum aviso fixado.</font></html>");
 	private final JPanel recentActivities = new JPanel();
 	private final Set<String> expandedActivities = new HashSet<>();
 	private List<RecentActivity> currentActivities = Collections.emptyList();
@@ -64,18 +64,16 @@ final class LiveOnPanel extends JPanel
 		JPanel notice = new JPanel(new BorderLayout());
 		notice.setAlignmentX(LEFT_ALIGNMENT);
 		notice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
-		notice.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 0, 0, new Color(75, 170, 235)),
-			BorderFactory.createEmptyBorder(7, 8, 7, 6)));
+		notice.setBackground(LiveOnTheme.CARD);
+		LiveOnTheme.roundCard(notice, LiveOnTheme.ORANGE, new java.awt.Insets(7, 8, 7, 6));
 		notice.add(pinnedNotice);
 		home.add(notice);
 		home.add(javax.swing.Box.createVerticalStrut(8));
 		home.add(createSectionDivider());
 		home.add(javax.swing.Box.createVerticalStrut(8));
-		JLabel title = new JLabel("ONLINE NA TWITCH");
-		title.setForeground(new Color(70, 220, 100));
-		title.setAlignmentX(LEFT_ALIGNMENT);
-		home.add(title);
+		JLabel liveSectionTitle = LiveOnTheme.sectionTitle("Ao vivo na Twitch");
+		liveSectionTitle.setForeground(LiveOnTheme.GREEN);
+		home.add(liveSectionTitle);
 		home.add(javax.swing.Box.createVerticalStrut(5));
 		onlineChannels.setLayout(new BoxLayout(onlineChannels, BoxLayout.Y_AXIS));
 		onlineChannels.setAlignmentX(LEFT_ALIGNMENT);
@@ -85,10 +83,7 @@ final class LiveOnPanel extends JPanel
 		home.add(javax.swing.Box.createVerticalStrut(8));
 		home.add(createSectionDivider());
 		home.add(javax.swing.Box.createVerticalStrut(8));
-		JLabel recentTitle = new JLabel("ATIVIDADE RECENTE DO CLÃ");
-		recentTitle.setForeground(new Color(255, 152, 0));
-		recentTitle.setAlignmentX(LEFT_ALIGNMENT);
-		home.add(recentTitle);
+		home.add(LiveOnTheme.sectionTitle("Atividade do clã"));
 		recentActivities.setLayout(new BoxLayout(recentActivities, BoxLayout.Y_AXIS));
 		recentActivities.setAlignmentX(LEFT_ALIGNMENT);
 		home.add(recentActivities);
@@ -101,7 +96,7 @@ final class LiveOnPanel extends JPanel
 		fields.add(new JLabel("Canal da Twitch"));
 		fields.add(twitch);
 		JButton save = new JButton("Associar / Atualizar");
-		save.setBackground(new Color(190, 104, 0));
+		save.setBackground(LiveOnTheme.ACTION);
 		save.setForeground(Color.WHITE);
 		save.addActionListener(event -> saveAction.accept(rsn.getText().trim(), twitch.getText().trim()));
 		fields.add(save);
@@ -151,8 +146,8 @@ final class LiveOnPanel extends JPanel
 			{
 				JLabel empty = new JLabel("Nenhuma live ativa no momento.");
 				empty.setHorizontalAlignment(JLabel.CENTER);
-				empty.setForeground(new Color(155, 155, 155));
-				empty.setBorder(BorderFactory.createEmptyBorder(18, 4, 18, 4));
+				empty.setForeground(LiveOnTheme.TEXT_MUTED);
+				empty.setBorder(BorderFactory.createEmptyBorder(14, 4, 14, 4));
 				onlineChannels.add(empty);
 			}
 			else
@@ -170,8 +165,8 @@ final class LiveOnPanel extends JPanel
 	void updatePinnedNotice(String message)
 	{
 		SwingUtilities.invokeLater(() -> pinnedNotice.setText(message == null || message.trim().isEmpty()
-			? "<html><b>AVISOS</b><br><font color='#aaaaaa'>Nenhum aviso fixado.</font></html>"
-			: "<html><b>AVISOS</b><br><div style='width:150px'>" + escapeHtml(message.trim()) + "</div></html>"));
+			? "<html><font color='#ff981f'>&#128204; Aviso</font><br><font color='#a0a0a0'>Nenhum aviso fixado.</font></html>"
+			: "<html><font color='#ff981f'>&#128204; Aviso</font><br><div style='width:135px'>" + escapeHtml(message.trim()) + "</div></html>"));
 	}
 
 	private static String escapeHtml(String value)
@@ -194,24 +189,33 @@ final class LiveOnPanel extends JPanel
 			if (displayed.isEmpty())
 			{
 				JLabel empty = new JLabel("Nenhuma atividade recente.");
-				empty.setForeground(new Color(155, 155, 155));
+				empty.setForeground(LiveOnTheme.TEXT_MUTED);
 				empty.setBorder(BorderFactory.createEmptyBorder(8, 4, 8, 4));
 				recentActivities.add(empty);
 			}
-			else for (RecentActivity activity : displayed)
+			else
 			{
-				JPanel row = new JPanel(new BorderLayout(5, 0));
+			int rowIndex = 0;
+			for (RecentActivity activity : displayed)
+			{
+				JPanel row = new JPanel(new BorderLayout(7, 0));
 				row.setAlignmentX(LEFT_ALIGNMENT);
-				Color accent = "CLAN_RECORD".equals(activity.type) ? new Color(90, 190, 245)
-					: new Color(235, 185, 45);
-				row.setBorder(BorderFactory.createCompoundBorder(
-					BorderFactory.createMatteBorder(0, 3, 1, 0, accent),
-					BorderFactory.createEmptyBorder(5, 7, 5, 4)));
-				String icon = "CLAN_RECORD".equals(activity.type) ? "◷"
-					: "MVP_LEADER".equals(activity.type) || "MVP_WINNER".equals(activity.type) ? "♛" : "★";
-				JLabel marker = new JLabel(icon);
+				Color accent = activityAccent(activity.type);
+				// Subtle zebra striping so consecutive cards stay easy to tell apart.
+				row.setBackground(rowIndex % 2 == 0 ? LiveOnTheme.CARD : LiveOnTheme.CARD_HOVER);
+				rowIndex++;
+				String icon = "MVP_LEADER".equals(activity.type) || "MVP_WINNER".equals(activity.type) ? "\u265B"
+					: "DROP_MILESTONE".equals(activity.type) ? "\u25C6" : "\u25B2";
+				boolean isClanRecord = "CLAN_RECORD".equals(activity.type);
+				// The card border follows the activity accent, but the trophy itself always
+				// stays gold - only the border should track the (now neutral) record color.
+				JLabel marker = isClanRecord
+					? new JLabel(LiveOnTheme.trophyIcon(LiveOnTheme.GOLD, 14))
+					: new JLabel(icon);
 				applyActivityIcon(marker, activity);
-				marker.setForeground(accent);
+				if (!isClanRecord) marker.setForeground(accent);
+				marker.setVerticalAlignment(JLabel.TOP);
+				marker.setBorder(BorderFactory.createEmptyBorder(1, 0, 0, 0));
 				String player = activity.player_name == null ? "" : activity.player_name;
 				String detail = activity.title == null ? "Atividade registrada" : activity.title;
 				String recordTime = "";
@@ -241,13 +245,15 @@ final class LiveOnPanel extends JPanel
 				boolean collective = player.isEmpty();
 				boolean clanRecord = "CLAN_RECORD".equals(activity.type);
 				String key = activityKey(activity);
-				boolean expanded = expandedActivities.contains(key);
-				boolean expandable = activityNeedsExpansion(
+				// Records and player-less announcements always wrap: the one-line label cut them at ~28 chars.
+				boolean alwaysWrapped = clanRecord || collective;
+				boolean expanded = alwaysWrapped || expandedActivities.contains(key);
+				boolean expandable = !alwaysWrapped && activityNeedsExpansion(
 					player, detail, mvpValue, collective, clanRecord);
 				JPanel text = createActivityText(player, detail, recordTime, mvpValue,
 					collective, clanRecord, expanded);
-				int collapsedHeight = clanRecord ? 59 : 43;
-				int rowHeight = expanded ? Math.max(collapsedHeight, text.getPreferredSize().height + 10) : collapsedHeight;
+				int collapsedHeight = 49;
+				int rowHeight = expanded ? Math.max(collapsedHeight, text.getPreferredSize().height + 14) : collapsedHeight;
 				row.setPreferredSize(new Dimension(210, rowHeight));
 				row.setMaximumSize(new Dimension(Integer.MAX_VALUE, rowHeight));
 				row.add(marker, BorderLayout.WEST);
@@ -268,7 +274,10 @@ final class LiveOnPanel extends JPanel
 					row.add(toggle, BorderLayout.EAST);
 					makeClickable(row, toggleActivity);
 				}
+				LiveOnTheme.roundCard(row, accent, new java.awt.Insets(6, 8, 6, 5));
 				recentActivities.add(row);
+				recentActivities.add(javax.swing.Box.createVerticalStrut(4));
+			}
 			}
 			recentActivities.revalidate();
 			recentActivities.repaint();
@@ -311,49 +320,44 @@ final class LiveOnPanel extends JPanel
 				+ escapeHtml(detail + timeSuffix + valueSuffix) + "</html>";
 		if (clanRecord && !recordTime.isEmpty())
 		{
-			JPanel heading = new JPanel(new BorderLayout(4, 0));
-			heading.setOpaque(false);
-			heading.setAlignmentX(LEFT_ALIGNMENT);
-			JLabel name = new JLabel("<html><b>" + escapeHtml(abbreviate(player, 16)) + "</b></html>");
-			name.setToolTipText(tooltip);
-			heading.add(name, BorderLayout.CENTER);
-			JLabel time = new JLabel(recordTime);
-			time.setForeground(new Color(90, 190, 245));
-			time.setToolTipText(tooltip);
-			heading.add(time, BorderLayout.EAST);
-			text.add(heading);
-
-			JLabel recordLabel = new JLabel("Novo melhor tempo do clã");
-			recordLabel.setToolTipText(tooltip);
-			text.add(recordLabel);
+			JLabel caption = new JLabel("Novo melhor tempo do clã");
+			caption.setForeground(LiveOnTheme.TEXT_FAINT);
+			caption.setFont(LiveOnTheme.small());
+			caption.setAlignmentX(LEFT_ALIGNMENT);
+			text.add(caption);
 			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
 			JLabel bossLabel = expanded
-				? new JLabel("<html><div style='width:125px'><b>" + escapeHtml(boss) + "</b></div></html>")
-				: new JLabel("<html><b>" + escapeHtml(abbreviate(boss, 24)) + "</b></html>");
-			bossLabel.setForeground(new Color(185, 205, 220));
-			bossLabel.setToolTipText(tooltip);
+				? new JLabel("<html><div style='width:128px'><b>" + escapeHtml(boss) + "</b></div></html>")
+				: new JLabel("<html><b>" + escapeHtml(abbreviate(boss, RECORD_BOSS_VISIBLE)) + "</b></html>");
+			bossLabel.setForeground(LiveOnTheme.TEXT);
+			bossLabel.setToolTipText("<html>Novo melhor tempo do clã · <b>" + escapeHtml(player) + "</b><br>"
+				+ escapeHtml(detail + timeSuffix + valueSuffix) + "</html>");
+			bossLabel.setAlignmentX(LEFT_ALIGNMENT);
 			text.add(bossLabel);
+
+			JLabel byline = new JLabel("<html><font color='" + LiveOnTheme.hex(LiveOnTheme.TEXT_MUTED) + "'>"
+				+ escapeHtml(abbreviate(player, 16)) + " · " + escapeHtml(recordTime) + "</font></html>");
+			byline.setToolTipText(tooltip);
+			byline.setAlignmentX(LEFT_ALIGNMENT);
+			text.add(byline);
 			return text;
 		}
 		if (!collective && !mvpValue.isEmpty())
 		{
-			JPanel heading = new JPanel(new BorderLayout(4, 0));
-			heading.setOpaque(false);
-			heading.setAlignmentX(LEFT_ALIGNMENT);
-			JLabel name = new JLabel("<html><b>" + escapeHtml(abbreviate(player, 15)) + "</b></html>");
-			name.setToolTipText(tooltip);
-			heading.add(name, BorderLayout.CENTER);
-			JLabel value = new JLabel(mvpValue);
-			value.setForeground(new Color(235, 185, 45));
-			value.setToolTipText(tooltip);
-			heading.add(value, BorderLayout.EAST);
-			text.add(heading);
-
 			JLabel summary = expanded
-				? new JLabel("<html><div style='width:125px'>" + escapeHtml(detail) + "</div></html>")
-				: new JLabel(abbreviate(detail, 29));
+				? new JLabel("<html><div style='width:128px'><b>" + escapeHtml(detail) + "</b></div></html>")
+				: new JLabel("<html><b>" + escapeHtml(abbreviate(detail, 29)) + "</b></html>");
+			summary.setForeground(LiveOnTheme.TEXT);
 			summary.setToolTipText(tooltip);
+			summary.setAlignmentX(LEFT_ALIGNMENT);
 			text.add(summary);
+
+			JLabel byline = new JLabel("<html><font color='" + LiveOnTheme.hex(LiveOnTheme.TEXT_MUTED) + "'>"
+				+ escapeHtml(abbreviate(player, 15)) + " · </font><font color='"
+				+ LiveOnTheme.hex(LiveOnTheme.GOLD) + "'>" + escapeHtml(mvpValue) + "</font></html>");
+			byline.setToolTipText(tooltip);
+			byline.setAlignmentX(LEFT_ALIGNMENT);
+			text.add(byline);
 			return text;
 		}
 		if (expanded)
@@ -370,10 +374,12 @@ final class LiveOnPanel extends JPanel
 		if (!collective)
 		{
 			JLabel name = new JLabel("<html><b>" + escapeHtml(abbreviate(player, 22)) + "</b></html>");
+			name.setForeground(LiveOnTheme.TEXT);
 			name.setToolTipText(tooltip);
 			text.add(name);
 		}
 		JLabel summary = new JLabel(abbreviate(detail, collective ? 50 : 29));
+		summary.setForeground(collective ? LiveOnTheme.TEXT : LiveOnTheme.TEXT_MUTED);
 		summary.setToolTipText(tooltip);
 		text.add(summary);
 		return text;
@@ -389,7 +395,7 @@ final class LiveOnPanel extends JPanel
 		if (clanRecord)
 		{
 			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
-			return player.length() > 16 || boss.length() > 24;
+			return player.length() > 16 || boss.length() > RECORD_BOSS_VISIBLE;
 		}
 		if (!mvpValue.isEmpty())
 		{
@@ -404,11 +410,23 @@ final class LiveOnPanel extends JPanel
 			+ '\u0000' + String.valueOf(activity.title);
 	}
 
+	// Long enough for "Tombs of Amascut: Expert Mode" so the raid mode is never cut off.
+	private static final int RECORD_BOSS_VISIBLE = 30;
+
+	private static Color activityAccent(String type)
+	{
+		if ("MVP_LEADER".equals(type) || "MVP_WINNER".equals(type)) return LiveOnTheme.GOLD;
+		if ("DROP_MILESTONE".equals(type)) return LiveOnTheme.RED;
+		// Green is reserved for live/online indicators; clan records get the same neutral
+		// gray as promotions instead.
+		return LiveOnTheme.CARD_EDGE;
+	}
+
 	private static JPanel createSectionDivider()
 	{
 		JPanel divider = new JPanel();
 		divider.setAlignmentX(LEFT_ALIGNMENT);
-		divider.setBackground(new Color(62, 62, 62));
+		divider.setBackground(LiveOnTheme.DIVIDER);
 		divider.setPreferredSize(new Dimension(210, 1));
 		divider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
 		return divider;
@@ -439,7 +457,7 @@ final class LiveOnPanel extends JPanel
 		@Override
 		public void paintIcon(Component component, java.awt.Graphics graphics, int x, int y)
 		{
-			graphics.setColor(component.isEnabled() ? new Color(190, 190, 190) : new Color(105, 105, 105));
+			graphics.setColor(component.isEnabled() ? LiveOnTheme.TEXT_MUTED : LiveOnTheme.TEXT_FAINT);
 			int[] xs = {x, x + 8, x + 4};
 			int[] ys = expanded ? new int[]{y + 6, y + 6, y + 1} : new int[]{y + 1, y + 1, y + 6};
 			graphics.fillPolygon(xs, ys, 3);
@@ -478,22 +496,21 @@ final class LiveOnPanel extends JPanel
 		card.setPreferredSize(new Dimension(210, 54));
 		card.setMinimumSize(new Dimension(0, 54));
 		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 54));
-		card.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 3, 1, 0, new Color(40, 200, 80)),
-			BorderFactory.createEmptyBorder(4, 7, 4, 5)));
+		card.setBackground(LiveOnTheme.CARD);
 
 		JPanel heading = new JPanel(new BorderLayout(5, 0));
 		heading.setOpaque(false);
 		heading.setAlignmentX(LEFT_ALIGNMENT);
 		heading.setMaximumSize(new Dimension(Integer.MAX_VALUE, 21));
 		String playerName = channel.playerName == null ? "Streamer" : channel.playerName;
-		JLabel name = new JLabel("●  " + abbreviate(playerName, 20));
+		JLabel name = new JLabel("<html><font color='" + LiveOnTheme.hex(LiveOnTheme.GREEN) + "'>\u25CF</font> <b>"
+			+ escapeHtml(abbreviate(playerName, 18)) + "</b></html>");
 		name.setToolTipText(playerName);
-		name.setForeground(new Color(70, 220, 100));
+		name.setForeground(LiveOnTheme.TEXT);
 		heading.add(name, BorderLayout.CENTER);
 		JLabel liveBadge = new JLabel("AO VIVO");
-		liveBadge.setForeground(new Color(85, 225, 110));
-		liveBadge.setFont(liveBadge.getFont().deriveFont(java.awt.Font.BOLD, 9f));
+		liveBadge.setForeground(LiveOnTheme.GREEN);
+		liveBadge.setFont(LiveOnTheme.small());
 		heading.add(liveBadge, BorderLayout.EAST);
 		card.add(heading);
 
@@ -504,18 +521,19 @@ final class LiveOnPanel extends JPanel
 		String fullUrl = channel.url == null ? "" : channel.url;
 		String shortUrl = fullUrl.replaceFirst("(?i)^https?://(?:www\\.)?", "");
 		JLabel url = new JLabel(abbreviate(shortUrl, 22));
-		url.setForeground(new Color(165, 165, 165));
+		url.setForeground(LiveOnTheme.TEXT_MUTED);
 		url.setToolTipText(fullUrl);
 		details.add(url, BorderLayout.CENTER);
 		JButton open = new JButton("Abrir");
-		open.setBackground(new Color(190, 104, 0));
-		open.setForeground(Color.WHITE);
+		open.setBackground(LiveOnTheme.GREEN_SOFT);
+		open.setForeground(LiveOnTheme.GREEN);
 		open.setMargin(new java.awt.Insets(1, 8, 1, 8));
 		open.setPreferredSize(new Dimension(54, 22));
 		open.setToolTipText("Abrir " + fullUrl);
 		open.addActionListener(event -> LinkBrowser.browse(fullUrl));
 		details.add(open, BorderLayout.EAST);
 		card.add(details);
+		LiveOnTheme.roundCard(card, LiveOnTheme.GREEN, new java.awt.Insets(5, 8, 5, 6));
 		return card;
 	}
 

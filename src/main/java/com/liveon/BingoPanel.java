@@ -45,16 +45,16 @@ final class BingoPanel extends JPanel
 		status.setMinimumSize(new Dimension(0, 0));
 		JPanel heading = new JPanel(new java.awt.GridLayout(0, 1, 0, 3));
 		heading.setBorder(BorderFactory.createEmptyBorder(7, 6, 7, 6));
-		score.setForeground(new Color(166, 226, 46));
+		score.setForeground(LiveOnTheme.GREEN);
 		score.setFont(score.getFont().deriveFont(java.awt.Font.BOLD, 15f));
-		progressBar.setForeground(new Color(166, 226, 46));
+		progressBar.setForeground(LiveOnTheme.GREEN);
 		heading.add(score); heading.add(summary); heading.add(progressBar);
 		add(heading, BorderLayout.NORTH);
 		add(section(openHeading, openTiles), BorderLayout.CENTER);
 		closedBody = section(null, closedTiles);
 		closedBody.setVisible(false);
 		closedBody.setPreferredSize(new Dimension(190, 160));
-		closedHeading.setForeground(new Color(166, 226, 46));
+		closedHeading.setForeground(LiveOnTheme.GREEN);
 		closedHeading.setBorder(BorderFactory.createEmptyBorder(5, 5, 4, 0));
 		closedHeading.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
 		closedHeading.setToolTipText("Clique para mostrar ou ocultar os tiles concluídos");
@@ -100,7 +100,7 @@ final class BingoPanel extends JPanel
 		JPanel section = new JPanel();
 		section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
 		JLabel heading = new JLabel(title);
-		heading.setForeground(new Color(166, 226, 46));
+		heading.setForeground(LiveOnTheme.GREEN);
 		heading.setAlignmentX(LEFT_ALIGNMENT);
 		section.add(heading);
 		section.add(Box.createVerticalStrut(3));
@@ -137,7 +137,7 @@ final class BingoPanel extends JPanel
 		section.setMinimumSize(new Dimension(0, 75));
 		if (heading != null)
 		{
-			heading.setForeground(new Color(166, 226, 46));
+			heading.setForeground(LiveOnTheme.GREEN);
 			heading.setBorder(BorderFactory.createEmptyBorder(4, 5, 2, 0));
 		}
 		EmptyMessageList list = new EmptyMessageList(model);
@@ -191,7 +191,7 @@ final class BingoPanel extends JPanel
 		{
 			super.paintComponent(graphics);
 			if (getModel().getSize() != 0 || emptyText.isEmpty()) return;
-			graphics.setColor(new Color(185, 185, 185));
+			graphics.setColor(LiveOnTheme.TEXT_MUTED);
 			java.awt.FontMetrics metrics = graphics.getFontMetrics(getFont());
 			int x = Math.max(6, (getWidth() - metrics.stringWidth(emptyText)) / 2);
 			int y = Math.max(metrics.getAscent() + 8, getHeight() / 3);
@@ -246,12 +246,12 @@ final class BingoPanel extends JPanel
 		{
 			int obtained = tile.get("obtained").getAsInt(), total = tile.get("total").getAsInt();
 			boolean done = obtained == total;
-			Color accent = done ? new Color(166, 226, 46) : obtained > 0 ? new Color(230, 183, 70) : new Color(145, 145, 145);
-			setBackground(selected ? new Color(48, 61, 36) : new Color(35, 35, 35));
+			Color accent = done ? LiveOnTheme.GREEN : obtained > 0 ? LiveOnTheme.GOLD : LiveOnTheme.TEXT_MUTED;
+			setBackground(selected ? LiveOnTheme.GREEN_SOFT : LiveOnTheme.CARD);
 			setBorder(BorderFactory.createCompoundBorder(BorderFactory.createMatteBorder(0, 3, 1, 0, accent), BorderFactory.createEmptyBorder(5, 5, 4, 4)));
 			title.setText("#" + tile.get("id").getAsInt() + " · " + tile.get("title").getAsString());
 			title.setForeground(accent); count.setText(obtained + "/" + total); count.setForeground(accent);
-			detail.setForeground(new Color(195, 195, 195));
+			detail.setForeground(LiveOnTheme.TEXT_MUTED);
 			String missing = tile.get("missing").getAsString().replaceAll("\\s+", " ").trim();
 			String description = done ? "✓ Concluído" : "Falta: " + (missing.isEmpty() ? "staff atualizando" : tile.get("missing").getAsString());
 			boolean expanded = expandedTiles.contains(tile.get("id").getAsInt());
@@ -262,7 +262,7 @@ final class BingoPanel extends JPanel
 			remove(detail); remove(fullDetail);
 			int height = 46;
 			if (expanded && overflow) {
-				fullDetail.setText(description); fullDetail.setForeground(new Color(205, 205, 205));
+				fullDetail.setText(description); fullDetail.setForeground(LiveOnTheme.TEXT);
 				java.awt.Insets padding = fullDetail.getInsets();
 				javax.swing.text.View view = fullDetail.getUI().getRootView(fullDetail);
 				view.setSize(Math.max(1, width - padding.left - padding.right), Float.MAX_VALUE);

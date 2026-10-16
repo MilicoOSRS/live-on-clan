@@ -25,6 +25,10 @@ final class RanksPanel extends JPanel
 {
 	private static final int PANEL_WIDTH = 225;
 	private static final int BODY_TEXT_WIDTH = 172;
+	// Noticeably narrower than the card's real content width: the wrapped text's last line
+	// otherwise lands right at the css width's boundary, and rendering it can clip a character
+	// past the card border.
+	private static final int NOTICE_TEXT_WIDTH = 130;
 	private static final int ICON_TEXT_WIDTH = 132;
 	private static final int REQUIREMENT_TEXT_WIDTH = 158;
 	private static final int NEXT_REQUIREMENT_TEXT_WIDTH = 148;
@@ -34,7 +38,7 @@ final class RanksPanel extends JPanel
 	private static final Font COMPACT_DETAIL_TITLE_FONT = COMPACT_DETAIL_FONT.deriveFont(Font.BOLD);
 	private static final Font RANK_NAME_FONT = new Font(Font.SANS_SERIF, Font.BOLD, 12);
 	private static final int RANK_ICON_SIZE = 13;
-	private static final Color ORANGE = new Color(190, 104, 0);
+	private static final Color ORANGE = LiveOnTheme.ACTION;
 	private static final String REQUEST_PENDING_TEXT = "Aguardando aprovação";
 	private static final String REQUEST_PENDING_STATUS = "Solicitação enviada para a staff.";
 	private static final List<String> PROGRESSION = Arrays.asList(
@@ -55,6 +59,7 @@ final class RanksPanel extends JPanel
 	private final JLabel specialTitle = new JLabel("Cargo especial");
 	private final JLabel specialNotice = new JLabel(wrapped("", BODY_TEXT_WIDTH));
 	private final JPanel specialCard = new JPanel(new BorderLayout());
+	private final JLabel bankNoticeTop = new JLabel("Abra o banco uma vez!", SwingConstants.CENTER);
 	private final JLabel requirementsTitle = new JLabel("Requisitos");
 	private final JLabel helper = new JLabel(wrapped("Equipe os itens exigidos e abra os menus necessários antes de verificar.", BODY_TEXT_WIDTH));
 	private final JPanel detected = new JPanel();
@@ -86,7 +91,7 @@ final class RanksPanel extends JPanel
 		requestRank.addActionListener(event -> requestRankAction.run());
 
 		playerName.setFont(playerName.getFont().deriveFont(Font.BOLD, 15f));
-		actualRank.setForeground(new Color(170, 170, 170));
+		actualRank.setForeground(LiveOnTheme.TEXT_MUTED);
 		JPanel identityText = new JPanel(new GridLayout(0, 1, 1, 1));
 		identityText.setOpaque(false);
 		identityText.add(playerName);
@@ -105,7 +110,7 @@ final class RanksPanel extends JPanel
 		availableBody.setBorder(BorderFactory.createEmptyBorder(5, 8, 5, 8));
 		availableBody.add(availableRankIcon, BorderLayout.WEST);
 		availableBody.add(availableRank, BorderLayout.CENTER);
-		availableCard.setBorder(BorderFactory.createLineBorder(new Color(58, 58, 58)));
+		availableCard.setBorder(BorderFactory.createLineBorder(LiveOnTheme.CARD_EDGE));
 		availableCard.add(availableHeader, BorderLayout.NORTH);
 		availableCard.add(availableBody, BorderLayout.CENTER);
 
@@ -125,8 +130,18 @@ final class RanksPanel extends JPanel
 		verifyRow.add(reset);
 		header.add(verifyRow);
 		header.add(Box.createVerticalStrut(3));
+		bankNoticeTop.setForeground(LiveOnTheme.GREEN);
+		bankNoticeTop.setFont(bankNoticeTop.getFont().deriveFont(Font.BOLD));
+		bankNoticeTop.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(LiveOnTheme.GREEN),
+			BorderFactory.createEmptyBorder(4, 6, 4, 6)));
+		bankNoticeTop.setAlignmentX(Component.LEFT_ALIGNMENT);
+		bankNoticeTop.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		bankNoticeTop.setVisible(false);
+		header.add(bankNoticeTop);
+		header.add(Box.createVerticalStrut(3));
 		specialTitle.setFont(specialTitle.getFont().deriveFont(Font.BOLD));
-		specialNotice.setForeground(new Color(180, 180, 180));
+		specialNotice.setForeground(LiveOnTheme.TEXT_MUTED);
 		JPanel specialBody = new JPanel();
 		specialBody.setOpaque(false);
 		specialBody.setLayout(new BoxLayout(specialBody, BoxLayout.Y_AXIS));
@@ -134,7 +149,7 @@ final class RanksPanel extends JPanel
 		specialBody.add(specialTitle);
 		specialBody.add(Box.createVerticalStrut(4));
 		specialBody.add(specialNotice);
-		specialCard.setBorder(BorderFactory.createLineBorder(new Color(78, 67, 42)));
+		specialCard.setBorder(BorderFactory.createLineBorder(new Color(86, 70, 38)));
 		specialCard.add(specialBody, BorderLayout.CENTER);
 		specialCard.setAlignmentX(Component.LEFT_ALIGNMENT);
 		specialCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 132));
@@ -146,9 +161,9 @@ final class RanksPanel extends JPanel
 		header.add(Box.createVerticalStrut(4));
 
 		JLabel nextTitle = new JLabel("Próximo objetivo");
-		nextTitle.setForeground(new Color(155, 155, 155));
+		nextTitle.setForeground(LiveOnTheme.TEXT_MUTED);
 		nextRank.setFont(RANK_NAME_FONT);
-		nextMissing.setForeground(new Color(165, 165, 165));
+		nextMissing.setForeground(LiveOnTheme.TEXT_MUTED);
 		JPanel nextBody = new JPanel();
 		nextBody.setOpaque(false);
 		nextBody.setLayout(new BoxLayout(nextBody, BoxLayout.Y_AXIS));
@@ -166,7 +181,7 @@ final class RanksPanel extends JPanel
 		nextMissing.setAlignmentX(Component.LEFT_ALIGNMENT);
 		nextMissing.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 		nextBody.add(nextMissing);
-		nextCard.setBorder(BorderFactory.createLineBorder(new Color(52, 52, 52)));
+		nextCard.setBorder(BorderFactory.createLineBorder(LiveOnTheme.DIVIDER));
 		nextCard.add(nextBody, BorderLayout.CENTER);
 		nextCard.setAlignmentX(Component.LEFT_ALIGNMENT);
 		nextCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
@@ -178,9 +193,9 @@ final class RanksPanel extends JPanel
 		requirementsTitle.setFont(requirementsTitle.getFont().deriveFont(Font.BOLD));
 		requirementsHeader.setBorder(BorderFactory.createEmptyBorder(4, 6, 3, 6));
 		requirementsHeader.add(requirementsTitle, BorderLayout.NORTH);
-		helper.setForeground(new Color(155, 155, 155));
+		helper.setForeground(LiveOnTheme.TEXT_MUTED);
 		requirementsHeader.add(helper, BorderLayout.SOUTH);
-		requirementsCard.setBorder(BorderFactory.createLineBorder(new Color(58, 58, 58)));
+		requirementsCard.setBorder(BorderFactory.createLineBorder(LiveOnTheme.CARD_EDGE));
 		requirementsCard.add(requirementsHeader, BorderLayout.NORTH);
 		requirementsCard.add(detected, BorderLayout.CENTER);
 
@@ -306,15 +321,19 @@ final class RanksPanel extends JPanel
 				availableTitle.setText("Nenhum rank novo disponível");
 				availableTitle.setFont(COMPACT_DETAIL_TITLE_FONT);
 				availableRank.setFont(COMPACT_DETAIL_FONT);
-				setWrappedText(availableRank, "Conclua as pendências abaixo e verifique novamente.", BODY_TEXT_WIDTH);
+				setWrappedText(availableRank, "Conclua as pendências abaixo e verifique novamente.", NOTICE_TEXT_WIDTH);
 				availableRankIcon.setIcon(new RankIcon(Color.GRAY));
 				availableRankIcon.setVisible(false);
 				requirementsTitle.setText("Dados verificados");
-				helper.setText(wrapped("Confira o que foi detectado. Se algo estiver pendente, siga a instrução exibida.", REQUIREMENT_TEXT_WIDTH));
+				helper.setText(wrapped("Confira o que foi detectado. Se algo estiver pendente, abra o banco ou equipe o item e verifique novamente.", REQUIREMENT_TEXT_WIDTH));
 				setWrappedText(nextRank, target == null ? "Próximo rank" : target);
 				nextRankIcon.setIcon(compactRankIcon(nextRankSuppliedIcon != null ? nextRankSuppliedIcon : rankIconFor(target)));
 				nextMissing.setText(missingSummary(nextChecks));
 			}
+
+			boolean bankNotLoaded = overviewChecks.stream()
+				.anyMatch(check -> normalize(check).startsWith("! abra o banco"));
+			bankNoticeTop.setVisible(bankNotLoaded);
 
 			detected.removeAll();
 			for (int index = 0; index < overviewChecks.size(); index++)
@@ -350,7 +369,7 @@ final class RanksPanel extends JPanel
 				requestRank.setToolTipText(canRequest ? "Enviar solicitação para a staff"
 					: "Complete ou verifique os requisitos destacados antes de solicitar");
 			}
-			verify.setBackground(canRequest ? new Color(52, 52, 52) : ORANGE);
+			verify.setBackground(canRequest ? LiveOnTheme.DIVIDER : ORANGE);
 		});
 	}
 
@@ -478,24 +497,24 @@ final class RanksPanel extends JPanel
 		if (normalized.startsWith("! abra o banco"))
 		{
 			label.setText(wrapped(text, REQUIREMENT_NOTICE_TEXT_WIDTH));
-			label.setForeground(new Color(115, 195, 255));
-			label.setBackground(new Color(25, 45, 61));
+			label.setForeground(LiveOnTheme.GREEN);
+			label.setBackground(LiveOnTheme.GREEN_SOFT);
 			label.setOpaque(true);
 			label.setFont(label.getFont().deriveFont(Font.BOLD));
 			label.setBorder(BorderFactory.createCompoundBorder(
-				BorderFactory.createLineBorder(new Color(55, 105, 140)),
+				BorderFactory.createLineBorder(new Color(86, 118, 36)),
 				BorderFactory.createEmptyBorder(5, 6, 5, 6)));
 			Dimension noticeSize = new Dimension(REQUIREMENT_NOTICE_WIDTH, label.getPreferredSize().height);
 			label.setPreferredSize(noticeSize);
 			label.setMaximumSize(noticeSize);
 		}
 		else if (text.trim().startsWith("✓"))
-			label.setForeground(new Color(55, 170, 75));
+			label.setForeground(LiveOnTheme.GREEN);
 		else if (text.trim().startsWith("✕"))
-			label.setForeground(new Color(195, 70, 60));
+			label.setForeground(LiveOnTheme.RED);
 		else if (text.trim().startsWith("!"))
-			label.setForeground(new Color(220, 160, 45));
-		else label.setForeground(new Color(175, 175, 175));
+			label.setForeground(LiveOnTheme.GOLD);
+		else label.setForeground(LiveOnTheme.TEXT_MUTED);
 		return label;
 	}
 
@@ -649,7 +668,7 @@ final class RanksPanel extends JPanel
 		SwingUtilities.invokeLater(() ->
 		{
 			status.setText(text);
-			status.setForeground(new Color(80, 220, 80));
+			status.setForeground(LiveOnTheme.GREEN);
 		});
 	}
 }
