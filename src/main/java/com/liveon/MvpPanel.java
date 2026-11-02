@@ -588,13 +588,37 @@ final class MvpPanel extends JPanel
 			LiveOnTheme.GREEN, LiveOnTheme.GREEN));
 		if (isEfficiencyExpanded(entry, metricType))
 		{
-			card.add(createEfficiencyDetails(entry, metricType, LiveOnTheme.GREEN_SOFT,
-				37 + placeWidth(entry.getPosition())), BorderLayout.CENTER);
+			JPanel details = createEfficiencyDetails(entry, metricType, LiveOnTheme.GREEN_SOFT,
+				37 + placeWidth(entry.getPosition()));
+			if (entry.getTotal() != null)
+			{
+				details.add(javax.swing.Box.createVerticalStrut(5));
+				details.add(createAccountTotalBubble(entry.getTotal()));
+			}
+			card.add(details, BorderLayout.CENTER);
 		}
 		makeEfficiencyGroupClickable(card, entry, metricType,
 			efficiencyHint(metricType, isEfficiencyExpanded(entry, metricType), true));
 		LiveOnTheme.roundCard(card, LiveOnTheme.GREEN, new java.awt.Insets(7, 3, 7, 8));
 		return card;
+	}
+
+	private static JPanel createAccountTotalBubble(double total)
+	{
+		JPanel bubble = new JPanel(new BorderLayout(4, 0));
+		bubble.setBackground(LiveOnTheme.CARD);
+		bubble.setAlignmentX(Component.LEFT_ALIGNMENT);
+		JLabel label = new JLabel("Total da conta");
+		label.setFont(META_FONT);
+		label.setForeground(LiveOnTheme.TEXT_MUTED);
+		JLabel value = new JLabel(formatHours(total));
+		value.setFont(META_FONT);
+		value.setForeground(LiveOnTheme.TEXT);
+		bubble.add(label, BorderLayout.CENTER);
+		bubble.add(value, BorderLayout.EAST);
+		LiveOnTheme.roundCard(bubble, new java.awt.Insets(4, 7, 4, 7));
+		bubble.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+		return bubble;
 	}
 
 	private JPanel createOwnDropRow(MvpDropEntry entry)
@@ -865,24 +889,28 @@ final class MvpPanel extends JPanel
 			movement.setHorizontalAlignment(SwingConstants.CENTER);
 			badge.add(movement);
 		}
-		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
-		identity.add(name);
-		identity.add(caption);
 		JLabel value = new JLabel(valueText, SwingConstants.RIGHT);
 		value.setForeground(GOLD);
 		value.setFont(LiveOnTheme.bold());
-		JPanel totals = new JPanel(new GridLayout(0, 1, 0, 1));
-		totals.add(value);
+		// Name shares its line only with the short value; the wider "+X à frente" goes under it,
+		// so long names are not cut by a wide value column.
+		JPanel nameLine = new JPanel(new BorderLayout(6, 0));
+		nameLine.add(name, BorderLayout.CENTER);
+		nameLine.add(value, BorderLayout.EAST);
+		JPanel captionLine = new JPanel(new BorderLayout(6, 0));
+		captionLine.add(caption, BorderLayout.WEST);
 		if (leadText != null)
 		{
 			JLabel ahead = new JLabel(leadText, SwingConstants.RIGHT);
 			ahead.setForeground(LiveOnTheme.TEXT_FAINT);
 			ahead.setFont(LiveOnTheme.small());
-			totals.add(ahead);
+			captionLine.add(ahead, BorderLayout.EAST);
 		}
+		JPanel identity = new JPanel(new GridLayout(0, 1, 0, 1));
+		identity.add(nameLine);
+		identity.add(captionLine);
 		summary.add(badge, BorderLayout.WEST);
 		summary.add(identity, BorderLayout.CENTER);
-		summary.add(totals, BorderLayout.EAST);
 		card.add(summary, BorderLayout.NORTH);
 		return card;
 	}

@@ -480,7 +480,8 @@ final class PbPanel extends JPanel
 		String normalized = safe(boss).toLowerCase(java.util.Locale.ROOT);
 		return normalized.contains("chambers of xeric")
 			|| normalized.contains("theatre of blood")
-			|| normalized.contains("tombs of amascut");
+			|| normalized.contains("tombs of amascut")
+			|| normalized.contains("fractured archive");
 	}
 
 	PbCategory selectedCategory()

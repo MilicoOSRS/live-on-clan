@@ -54,7 +54,7 @@ final class ClanTagsPanel extends JPanel
 		createForm.add(code);
 		createForm.add(new JLabel("Cor"));
 		createForm.add(color);
-		create.setBackground(new Color(190, 104, 0));
+		create.setBackground(LiveOnTheme.ACTION);
 		create.setForeground(Color.WHITE);
 		create.addActionListener(event -> createAction.accept(code.getText().trim(), selectedColor()));
 		createForm.add(create);
@@ -66,7 +66,7 @@ final class ClanTagsPanel extends JPanel
 		memberForm.add(tag);
 		memberForm.add(new JLabel("Nome do membro"));
 		memberForm.add(rsn);
-		addMember.setBackground(new Color(190, 104, 0));
+		addMember.setBackground(LiveOnTheme.ACTION);
 		addMember.setForeground(Color.WHITE);
 		addMember.addActionListener(event ->
 		{

@@ -1042,7 +1042,7 @@ final class ClanMessagesPanel extends PluginPanel
 			addNavigationButton("MVPs", "crown", mvpTab, "mvp", "Rankings MVP");
 			addNavigationButton("PBs", "trophy", pbTab, "pbs", "Recordes pessoais do clã");
 			addNavigationButton("Ranks", "star", ranksTab, "ranks", "Solicitação de ranks");
-			if (bingoVisible || staff) addNavigationButton("Bingo", "bingo", bingoTab, "bingo", "Progresso e itens que faltam");
+			if (bingoVisible) addNavigationButton("Bingo", "bingo", bingoTab, "bingo", "Progresso e itens que faltam");
 			if (staff)
 			{
 				mainCards.add(staffTab, "staff");
@@ -1051,7 +1051,7 @@ final class ClanMessagesPanel extends PluginPanel
 			mainArea.add(navigationGrid, BorderLayout.NORTH);
 			mainArea.add(mainCards, BorderLayout.CENTER);
 			String destination = currentPage;
-			if (("bingo".equals(destination) && !bingoVisible && !staff) || ("staff".equals(destination) && !staff)) destination = "home";
+			if (("bingo".equals(destination) && !bingoVisible) || ("staff".equals(destination) && !staff)) destination = "home";
 			selectPage(destination);
 			mainArea.revalidate();
 			mainArea.repaint();

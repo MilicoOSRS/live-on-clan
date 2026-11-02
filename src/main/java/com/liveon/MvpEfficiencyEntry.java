@@ -14,6 +14,8 @@ final class MvpEfficiencyEntry
 	private String accountType;
 	private double gained;
 	private MvpEfficiencyContribution[] breakdown;
+	/** Account total from Wise Old Man; null on older servers. */
+	private Double total;
 	private int position;
 	private transient int positionChange;
 

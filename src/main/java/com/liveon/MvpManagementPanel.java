@@ -39,7 +39,7 @@ final class MvpManagementPanel extends JPanel
 		form.add(new JLabel("Nome do membro"));
 		form.add(rsn);
 		JButton save = new JButton("Adicionar MVP");
-		save.setBackground(new Color(190, 104, 0));
+		save.setBackground(LiveOnTheme.ACTION);
 		save.setForeground(Color.WHITE);
 		save.addActionListener(event -> saveAction.accept(rsn.getText().trim()));
 		form.add(save);

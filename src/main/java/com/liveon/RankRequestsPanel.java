@@ -70,7 +70,7 @@ final class RankRequestsPanel extends JPanel
 		JPanel actions = new JPanel(new GridLayout(1, 3, 3, 0));
 		JButton confirm = new JButton("Aceitar");
 		confirm.setMargin(new java.awt.Insets(3, 2, 3, 2));
-		confirm.setBackground(new Color(190, 104, 0));
+		confirm.setBackground(LiveOnTheme.ACTION);
 		confirm.setForeground(Color.WHITE);
 		confirm.setToolTipText("Aceitar solicitação selecionada");
 		confirm.addActionListener(event ->
