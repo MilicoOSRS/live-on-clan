@@ -2614,7 +2614,7 @@ public class ClanMessagesPlugin extends Plugin
 			try
 			{
 				values = client.getDBTableField(
-					quest.getId(), DBTableID.Quest.COL_QUESTPOINTS, 0);
+					quest.getId(), DBTableID.Quest.COL_QUESTPOINTS_OVERRIDE, 0);
 			}
 			catch (IllegalArgumentException exception)
 			{
