@@ -47,6 +47,7 @@ final class LiveOnPanel extends JPanel
 	private final JPanel recentActivities = new JPanel();
 	private final Set<String> expandedActivities = new HashSet<>();
 	private List<RecentActivity> currentActivities = Collections.emptyList();
+	private RecentActivity dropOfDay;
 	private final DefaultTableModel model = new DefaultTableModel(new String[]{"RSN", "Twitch", "Status"}, 0)
 	{
 		@Override public boolean isCellEditable(int row, int column) { return false; }
@@ -136,6 +137,26 @@ final class LiveOnPanel extends JPanel
 		return staffManagement;
 	}
 
+	/** Shown on the pre-login welcome screen, for people who are not members yet. */
+	static JPanel createApplyCard()
+	{
+		JPanel card = new JPanel(new BorderLayout(0, 6));
+		card.setAlignmentX(CENTER_ALIGNMENT);
+		card.setMaximumSize(new Dimension(205, 170));
+		card.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 3, 0, 0, new Color(70, 220, 100)),
+			BorderFactory.createEmptyBorder(7, 8, 7, 6)));
+		JLabel text = new JLabel("<html><b>QUER ENTRAR NO LIVE ON?</b><br>"
+			+ "<div style='width:150px'><font color='#aaaaaa'>O apply é feito pelo site: entre com o Discord, "
+			+ "leia o guia e envie sua inscrição.</font></div></html>");
+		JButton apply = new JButton("Fazer apply no site");
+		apply.setToolTipText("Abrir " + LiveOnUrls.APPLY);
+		apply.addActionListener(event -> LinkBrowser.browse(LiveOnUrls.APPLY));
+		card.add(text, BorderLayout.CENTER);
+		card.add(apply, BorderLayout.SOUTH);
+		return card;
+	}
+
 	void updateOnline(List<LiveChannel> channels)
 	{
 		SwingUtilities.invokeLater(() ->
@@ -174,6 +195,21 @@ final class LiveOnPanel extends JPanel
 		return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 
+	void updateDropOfDay(RecentActivity drop)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (java.util.Objects.equals(activityKeyOrNull(dropOfDay), activityKeyOrNull(drop))) return;
+			dropOfDay = drop;
+			updateRecent(currentActivities);
+		});
+	}
+
+	private static String activityKeyOrNull(RecentActivity activity)
+	{
+		return activity == null ? null : activityKey(activity);
+	}
+
 	void updateRecent(List<RecentActivity> activities)
 	{
 		SwingUtilities.invokeLater(() ->
@@ -182,7 +218,10 @@ final class LiveOnPanel extends JPanel
 			List<RecentActivity> displayed = activities == null ? new ArrayList<>() : new ArrayList<>(activities);
 			displayed.removeIf(activity -> activity == null || !isFeedActivity(activity.type));
 			if (displayed.size() > 10) displayed = new ArrayList<>(displayed.subList(0, 10));
+			// Same drop the site highlights, always first.
+			if (dropOfDay != null) displayed.add(0, dropOfDay);
 			currentActivities = new ArrayList<>(displayed);
+			currentActivities.removeIf(activity -> RecentActivity.DROP_OF_DAY.equals(activity.type));
 			Set<String> visibleKeys = new HashSet<>();
 			for (RecentActivity activity : displayed) visibleKeys.add(activityKey(activity));
 			expandedActivities.retainAll(visibleKeys);
@@ -205,7 +244,8 @@ final class LiveOnPanel extends JPanel
 				row.setBackground(rowIndex % 2 == 0 ? LiveOnTheme.CARD : LiveOnTheme.CARD_HOVER);
 				rowIndex++;
 				String icon = "MVP_LEADER".equals(activity.type) || "MVP_WINNER".equals(activity.type) ? "\u265B"
-					: "DROP_MILESTONE".equals(activity.type) ? "\u25C6" : "\u25B2";
+					: "DROP_MILESTONE".equals(activity.type) || RecentActivity.DROP_OF_DAY.equals(activity.type)
+						? "\u25C6" : "\u25B2";
 				boolean isClanRecord = "CLAN_RECORD".equals(activity.type);
 				// The card border follows the activity accent, but the trophy itself always
 				// stays gold - only the border should track the (now neutral) record color.
@@ -246,12 +286,14 @@ final class LiveOnPanel extends JPanel
 				boolean clanRecord = "CLAN_RECORD".equals(activity.type);
 				String key = activityKey(activity);
 				// Records and player-less announcements always wrap: the one-line label cut them at ~28 chars.
-				boolean alwaysWrapped = clanRecord || collective;
+				boolean pinnedDrop = RecentActivity.DROP_OF_DAY.equals(activity.type);
+				boolean alwaysWrapped = clanRecord || collective || pinnedDrop;
 				boolean expanded = alwaysWrapped || expandedActivities.contains(key);
 				boolean expandable = !alwaysWrapped && activityNeedsExpansion(
 					player, detail, mvpValue, collective, clanRecord);
-				JPanel text = createActivityText(player, detail, recordTime, mvpValue,
-					collective, clanRecord, expanded);
+				JPanel text = pinnedDrop
+					? createDropOfDayText(player, detail)
+					: createActivityText(player, detail, recordTime, mvpValue, collective, clanRecord, expanded);
 				int collapsedHeight = 49;
 				int rowHeight = expanded ? Math.max(collapsedHeight, text.getPreferredSize().height + 14) : collapsedHeight;
 				row.setPreferredSize(new Dimension(210, rowHeight));
@@ -327,8 +369,8 @@ final class LiveOnPanel extends JPanel
 			text.add(caption);
 			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
 			JLabel bossLabel = expanded
-				? new JLabel("<html><div style='width:128px'><b>" + escapeHtml(boss) + "</b></div></html>")
-				: new JLabel("<html><b>" + escapeHtml(abbreviate(boss, RECORD_BOSS_VISIBLE)) + "</b></html>");
+				? new JLabel("<html><div style='width:" + TEXT_WIDTH + "px'><b>" + wrapSafe(boss) + "</b></div></html>")
+				: new JLabel("<html><b>" + escapeHtml(fit(boss, BOLD_FONT, TEXT_WIDTH)) + "</b></html>");
 			bossLabel.setForeground(LiveOnTheme.TEXT);
 			bossLabel.setToolTipText("<html>Novo melhor tempo do clã · <b>" + escapeHtml(player) + "</b><br>"
 				+ escapeHtml(detail + timeSuffix + valueSuffix) + "</html>");
@@ -336,7 +378,7 @@ final class LiveOnPanel extends JPanel
 			text.add(bossLabel);
 
 			JLabel byline = new JLabel("<html><font color='" + LiveOnTheme.hex(LiveOnTheme.TEXT_MUTED) + "'>"
-				+ escapeHtml(abbreviate(player, 16)) + " · " + escapeHtml(recordTime) + "</font></html>");
+				+ escapeHtml(fit(player, PLAIN_FONT, TEXT_WIDTH - textWidth(" · " + recordTime, PLAIN_FONT))) + " · " + escapeHtml(recordTime) + "</font></html>");
 			byline.setToolTipText(tooltip);
 			byline.setAlignmentX(LEFT_ALIGNMENT);
 			text.add(byline);
@@ -345,15 +387,15 @@ final class LiveOnPanel extends JPanel
 		if (!collective && !mvpValue.isEmpty())
 		{
 			JLabel summary = expanded
-				? new JLabel("<html><div style='width:128px'><b>" + escapeHtml(detail) + "</b></div></html>")
-				: new JLabel("<html><b>" + escapeHtml(abbreviate(detail, 29)) + "</b></html>");
+				? new JLabel("<html><div style='width:" + TEXT_WIDTH + "px'><b>" + wrapSafe(detail) + "</b></div></html>")
+				: new JLabel("<html><b>" + escapeHtml(fit(detail, BOLD_FONT, TEXT_WIDTH)) + "</b></html>");
 			summary.setForeground(LiveOnTheme.TEXT);
 			summary.setToolTipText(tooltip);
 			summary.setAlignmentX(LEFT_ALIGNMENT);
 			text.add(summary);
 
 			JLabel byline = new JLabel("<html><font color='" + LiveOnTheme.hex(LiveOnTheme.TEXT_MUTED) + "'>"
-				+ escapeHtml(abbreviate(player, 15)) + " · </font><font color='"
+				+ escapeHtml(fit(player, PLAIN_FONT, TEXT_WIDTH - textWidth(" · " + mvpValue, PLAIN_FONT))) + " · </font><font color='"
 				+ LiveOnTheme.hex(LiveOnTheme.GOLD) + "'>" + escapeHtml(mvpValue) + "</font></html>");
 			byline.setToolTipText(tooltip);
 			byline.setAlignmentX(LEFT_ALIGNMENT);
@@ -362,9 +404,9 @@ final class LiveOnPanel extends JPanel
 		}
 		if (expanded)
 		{
-			JLabel full = new JLabel("<html><div style='width:125px'>"
-				+ (collective ? "<b>" + escapeHtml(detail) + "</b>"
-				: "<b>" + escapeHtml(player) + "</b><br>" + escapeHtml(detail))
+			JLabel full = new JLabel("<html><div style='width:" + TEXT_WIDTH + "px'>"
+				+ (collective ? "<b>" + wrapSafe(detail) + "</b>"
+				: "<b>" + wrapSafe(player) + "</b><br>" + wrapSafe(detail))
 				+ "</div></html>");
 			full.setToolTipText(tooltip);
 			text.add(full);
@@ -373,12 +415,12 @@ final class LiveOnPanel extends JPanel
 
 		if (!collective)
 		{
-			JLabel name = new JLabel("<html><b>" + escapeHtml(abbreviate(player, 22)) + "</b></html>");
+			JLabel name = new JLabel("<html><b>" + escapeHtml(fit(player, BOLD_FONT, TEXT_WIDTH)) + "</b></html>");
 			name.setForeground(LiveOnTheme.TEXT);
 			name.setToolTipText(tooltip);
 			text.add(name);
 		}
-		JLabel summary = new JLabel(abbreviate(detail, collective ? 50 : 29));
+		JLabel summary = new JLabel(fit(detail, PLAIN_FONT, TEXT_WIDTH));
 		summary.setForeground(collective ? LiveOnTheme.TEXT : LiveOnTheme.TEXT_MUTED);
 		summary.setToolTipText(tooltip);
 		text.add(summary);
@@ -395,13 +437,17 @@ final class LiveOnPanel extends JPanel
 		if (clanRecord)
 		{
 			String boss = detail.replaceFirst("(?i)^novo melhor tempo do clã em\\s+", "").trim();
-			return player.length() > 16 || boss.length() > RECORD_BOSS_VISIBLE;
+			return player.length() > 16 || boss.length() > RECORD_BOSS_VISIBLE
+				|| textWidth(boss, BOLD_FONT) > TEXT_WIDTH;
 		}
 		if (!mvpValue.isEmpty())
 		{
-			return player.length() > 15 || detail.length() > 29;
+			return player.length() > 15 || detail.length() > 29
+				|| textWidth(detail, BOLD_FONT) > TEXT_WIDTH
+				|| textWidth(player + " · " + mvpValue, PLAIN_FONT) > TEXT_WIDTH;
 		}
-		return player.length() > 22 || detail.length() > 29;
+		return player.length() > 22 || detail.length() > 29
+			|| textWidth(player, BOLD_FONT) > TEXT_WIDTH || textWidth(detail, PLAIN_FONT) > TEXT_WIDTH;
 	}
 
 	private static String activityKey(RecentActivity activity)
@@ -417,6 +463,7 @@ final class LiveOnPanel extends JPanel
 	{
 		if ("MVP_LEADER".equals(type) || "MVP_WINNER".equals(type)) return LiveOnTheme.GOLD;
 		if ("DROP_MILESTONE".equals(type)) return LiveOnTheme.RED;
+		if (RecentActivity.DROP_OF_DAY.equals(type)) return LiveOnTheme.GOLD;
 		// Green is reserved for live/online indicators; clan records get the same neutral
 		// gray as promotions instead.
 		return LiveOnTheme.CARD_EDGE;
@@ -437,6 +484,82 @@ final class LiveOnPanel extends JPanel
 		return "PROMOTION".equals(type) || "CLAN_RECORD".equals(type)
 			|| "MVP_LEADER".equals(type) || "MVP_WINNER".equals(type)
 			|| "DROP_MILESTONE".equals(type);
+	}
+
+	/** Width available for activity text next to the marker and the toggle arrow. */
+	private static final int TEXT_WIDTH = 126;
+	private static final java.awt.Font PLAIN_FONT = new JLabel().getFont();
+	private static final java.awt.Font BOLD_FONT = PLAIN_FONT.deriveFont(java.awt.Font.BOLD);
+
+	private static final java.util.Map<java.awt.Font, java.awt.FontMetrics> METRICS = new java.util.HashMap<>();
+
+	private static int textWidth(String value, java.awt.Font font)
+	{
+		if (value == null) return 0;
+		java.awt.FontMetrics metrics = METRICS.get(font);
+		if (metrics == null)
+		{
+			metrics = new JLabel().getFontMetrics(font);
+			METRICS.put(font, metrics);
+		}
+		return metrics.stringWidth(value);
+	}
+
+	/** Cuts the text with an ellipsis so it fits the given pixel width instead of a guessed character count. */
+	private static String fit(String value, java.awt.Font font, int maxWidth)
+	{
+		if (value == null || textWidth(value, font) <= maxWidth) return value;
+		String ellipsis = "…";
+		// Binary search for the longest prefix that still fits next to the ellipsis.
+		int low = 1;
+		int high = value.length();
+		while (low < high)
+		{
+			int middle = (low + high + 1) >>> 1;
+			if (textWidth(value.substring(0, middle).trim() + ellipsis, font) <= maxWidth) low = middle;
+			else high = middle - 1;
+		}
+		return value.substring(0, low).trim() + ellipsis;
+	}
+
+	/** HTML-escapes and lets very long words wrap (Swing only breaks at spaces and zero-width spaces). */
+	private static String wrapSafe(String value)
+	{
+		StringBuilder out = new StringBuilder();
+		int run = 0;
+		for (char c : value.toCharArray())
+		{
+			run = Character.isWhitespace(c) ? 0 : run + 1;
+			out.append(escapeHtml(String.valueOf(c)));
+			if (run >= 12) { out.append('​'); run = 0; }
+		}
+		return out.toString();
+	}
+
+	/** Pinned "Drop do dia": bold pinned title, the player, then the item wrapped on its own lines. */
+	private static JPanel createDropOfDayText(String player, String title)
+	{
+		String detail = title.replaceFirst("^Drop do dia:\\s*", "");
+		JPanel text = new JPanel();
+		text.setOpaque(false);
+		text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
+		JLabel heading = new JLabel("<html><b>&#128204; Drop do dia</b></html>");
+		heading.setForeground(LiveOnTheme.GOLD);
+		heading.setAlignmentX(LEFT_ALIGNMENT);
+		JLabel who = new JLabel("<html><div style='width:" + TEXT_WIDTH + "px'><b>" + wrapSafe(player) + "</b></div></html>");
+		who.setForeground(LiveOnTheme.TEXT);
+		who.setAlignmentX(LEFT_ALIGNMENT);
+		JLabel item = new JLabel("<html><div style='width:" + TEXT_WIDTH + "px'>" + wrapSafe(detail) + "</div></html>");
+		item.setForeground(LiveOnTheme.TEXT_MUTED);
+		item.setAlignmentX(LEFT_ALIGNMENT);
+		String tooltip = "<html><b>Drop do dia</b><br>" + escapeHtml(player) + "<br>" + escapeHtml(detail) + "</html>";
+		heading.setToolTipText(tooltip);
+		who.setToolTipText(tooltip);
+		item.setToolTipText(tooltip);
+		text.add(heading);
+		if (!player.isEmpty()) text.add(who);
+		text.add(item);
+		return text;
 	}
 
 	private static String abbreviate(String value, int maximumLength)

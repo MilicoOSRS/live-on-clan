@@ -53,6 +53,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuEntryAdded;
+import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.GameTick;
@@ -60,7 +61,6 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
-import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.events.ConfigChanged;
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
@@ -271,6 +271,7 @@ public class ClanMessagesPlugin extends Plugin
 	private final AtomicBoolean eventOverlayFetchInFlight = new AtomicBoolean(false);
 	private volatile EventOverlayState eventOverlayState = new EventOverlayState();
 	private ClanEventOverlay eventOverlay;
+	private ClanBadgeOverlay clanBadgeOverlay;
 	private ManualBingoClient manualBingo;
 	private final AtomicBoolean pbCategoriesFetchInFlight = new AtomicBoolean(false);
 	private final AtomicLong pbRankingRequestGeneration = new AtomicLong();
@@ -317,6 +318,7 @@ public class ClanMessagesPlugin extends Plugin
 	private String rankBankAccount = "";
 	private boolean rankBankLoaded;
 	private int lastObservedRankTotalLevel = -1;
+	private java.util.Set<Integer> lastCarriedRankItemIds;
 	private volatile boolean rankRequestStatusKnown;
 	private volatile boolean rankRequestPending;
 	private boolean adventureLogMenuLoaded;
@@ -421,7 +423,7 @@ public class ClanMessagesPlugin extends Plugin
 		dropDeliveryClient.setDiagnosticJournal(dropDiagnosticJournal);
 		dropDeliveryClient.setDeliveredCallback(destination -> {
 			if ("MVP drop".equals(destination)) fetchMvpDrops();
-			if ("PB".equals(destination)) fetchPbCategories();
+			if ("PB".equals(destination)) refreshPbCategoriesAfterWrite();
 		});
 		dropDeliveryClient.setProgressListener(this::onDeliveryProgress);
 		dropDeliveryClient.setOutbox(new DropOutbox(
@@ -432,6 +434,8 @@ public class ClanMessagesPlugin extends Plugin
 		clanLiveBadgeDecorator = new ClanLiveBadgeDecorator(client, this);
 		eventOverlay = new ClanEventOverlay(this);
 		overlayManager.add(eventOverlay);
+		clanBadgeOverlay = new ClanBadgeOverlay(client, this);
+		overlayManager.add(clanBadgeOverlay);
 		net.runelite.client.util.AsyncBufferedImage mvpDropIcon = itemManager.getImage(ItemID.COINS_10000);
 		panel = new ClanMessagesPanel(() -> publishDraft("BROADCAST"), () -> publishDraft("CLAN"), () -> verifyToken(true), this::clearMessages, this::refreshRanks, this::resetRanks, this::requestRank, this::fetchRankRequests, this::deleteRankRequest, this::confirmRankRequest, this::declineRankRequest, this::fetchSentMessages, this::deleteSentMessage, this::resendSentMessage, this::togglePinnedMessage, this::publishPanelNotice, this::removePanelNotice, this::saveEventOverlay, this::fetchLives, this::saveLiveChannel, this::deleteLiveChannel, this::fetchMvpMembers, this::saveMvpMember, this::deleteMvpMember, this::fetchClanTags, this::createClanTag, this::addClanTagMember, this::deleteClanTag, this::removeClanTagMember, this::fetchPbCategories, this::fetchPbRanking, config.staffAccessKey(), this::saveStaffAccessKey, mvpDropIcon);
 		manualBingo = new ManualBingoClient(gson, panel,
@@ -505,6 +509,11 @@ public class ClanMessagesPlugin extends Plugin
 		{
 			clientToolbar.removeNavigation(navigationButton);
 		}
+		if (clanBadgeOverlay != null)
+		{
+			overlayManager.remove(clanBadgeOverlay);
+			clanBadgeOverlay = null;
+		}
 		if (eventOverlay != null)
 		{
 			overlayManager.remove(eventOverlay);
@@ -553,6 +562,14 @@ public class ClanMessagesPlugin extends Plugin
 			{
 				rebuildNavigationButton();
 			}
+			if ("liveStatusEnabled".equals(event.getKey()))
+			{
+				// The chatbox is no longer rebuilt on every poll, so redraw the LIVE badges here.
+				clientThread.invokeLater(() ->
+				{
+					if (client.getGameState() == GameState.LOGGED_IN) client.runScript(ScriptID.BUILD_CHATBOX);
+				});
+			}
 			if ("pbRankingEnabled".equals(event.getKey()) && panel != null)
 			{
 				panel.setPbParticipationEnabled(config.pbRankingEnabled());
@@ -590,7 +607,14 @@ public class ClanMessagesPlugin extends Plugin
 					}
 				}
 			}
-			configurePolling();
+			// Only these keys change who or how often we poll. The plugin also stores per-account state in this
+			// group (the message cursor is written for every message received); restarting on those writes
+			// re-sent every periodic request at once.
+			if ("enabled".equals(event.getKey()) || "serverUrl".equals(event.getKey())
+				|| "messagePollSeconds".equals(event.getKey()) || "staffAccessKey".equals(event.getKey()))
+			{
+				configurePolling();
+			}
 			if ("statsEnabled".equals(event.getKey()) || "discordDropsEnabled".equals(event.getKey())
 				|| "pbRankingEnabled".equals(event.getKey()))
 				clientThread.invokeLater(this::recoverPendingDrops);
@@ -600,61 +624,167 @@ public class ClanMessagesPlugin extends Plugin
 	@Subscribe
 	public void onMenuEntryAdded(MenuEntryAdded event)
 	{
-		if (!"Report".equals(event.getOption()))
+		// Native player options (the "Lookup" entry is itself added by another plugin, so it never reaches us).
+		String option = event.getOption();
+		if (option == null || event.getTarget() == null || !(option.equals("Add friend")
+			|| option.equals("Remove friend") || option.equals("Message") || option.equals("Add ignore")
+			|| option.equals("Hop-to")))
 		{
 			return;
 		}
+		// Only the clan tab and clan members' chat lines get the profile link: never players in the world,
+		// the friends list or any other interface. Player entries carry scene coordinates here, not a widget.
+		int interfaceId = net.runelite.api.widgets.WidgetUtil.componentToInterface(event.getActionParam1());
+		if (event.getMenuEntry().getPlayer() != null
+			|| (interfaceId != InterfaceID.CLANS_SIDEPANEL && interfaceId != InterfaceID.CHATBOX))
+		{
+			return;
+		}
+		if (interfaceId == InterfaceID.CHATBOX && !isClanMemberName(Text.removeTags(event.getTarget())))
+		{
+			return;
+		}
+		for (net.runelite.api.MenuEntry existing : client.getMenu().getMenuEntries())
+		{
+			if ("Liveon.gg".equals(existing.getOption()) && event.getTarget().equals(existing.getTarget()))
+			{
+				return;
+			}
+		}
+		String slug = playerProfileSlug(Text.removeTags(event.getTarget()));
+		// RuneScape names have at most 12 characters; anything longer is not a player target.
+		if (slug.isEmpty() || slug.length() > 12)
+		{
+			return;
+		}
+		String url = LiveOnUrls.playerProfile(slug);
+		client.getMenu().createMenuEntry(-1)
+			.setOption("Liveon.gg")
+			.setTarget(event.getTarget())
+			.setType(MenuAction.RUNELITE)
+			.onClick(entry -> LinkBrowser.browse(url));
+	}
 
-		int packedWidgetId = event.getActionParam1();
-		int groupId = WidgetUtil.componentToInterface(packedWidgetId);
-		int childId = WidgetUtil.componentToId(packedWidgetId);
-		if (groupId != InterfaceID.CHATBOX)
-		{
-			return;
-		}
+	/** The menu does not say which channel a chat line came from, so the sender's clan membership decides. */
+	private boolean isClanMemberName(String displayedName)
+	{
+		net.runelite.api.clan.ClanSettings settings = client.getClanSettings();
+		return settings != null && displayedName != null
+			&& settings.findMember(Text.toJagexName(displayedName)) != null;
+	}
 
-		Widget menuWidget = client.getWidget(groupId, childId);
-		Widget messageLines = menuWidget == null ? null : menuWidget.getParent();
-		if (messageLines == null || messageLines.getId() != InterfaceID.Chatbox.SCROLLAREA)
+	/** Menu arrays are bottom-to-top, so putting our entry at Lookup's index shows it right under Lookup. */
+	private void placeProfileEntryBelowLookup()
+	{
+		net.runelite.api.MenuEntry[] entries = client.getMenu().getMenuEntries();
+		int profile = -1;
+		int lookup = -1;
+		for (int i = 0; i < entries.length; i++)
+		{
+			if ("Liveon.gg".equals(entries[i].getOption())) profile = i;
+			else if ("Lookup".equals(entries[i].getOption())) lookup = i;
+		}
+		if (profile < 0 || lookup < 0 || profile < lookup)
 		{
 			return;
 		}
+		net.runelite.api.MenuEntry moved = entries[profile];
+		System.arraycopy(entries, lookup, entries, lookup + 1, profile - lookup);
+		entries[lookup] = moved;
+		client.getMenu().setMenuEntries(entries);
+	}
 
-		int messageChildIndex = (childId - (InterfaceID.Chatbox.LINE0 & 0xFFFF)) * 4 + 1;
-		Widget messageWidget = messageChildIndex < 0 ? null : messageLines.getChild(messageChildIndex);
-		if (messageWidget == null)
-		{
-			return;
-		}
+	/** Mirrors the site's playerSlug(): lowercase, spaces/underscores to "-", anything else dropped. */
+	static String playerProfileSlug(String playerName)
+	{
+		if (playerName == null) return "";
+		// World players are listed as "Name  (level-126)"; the level is not part of the name.
+		return playerName.replace((char) 160, (char) 32).replaceAll("\\s*\\(level-\\d+\\)\\s*$", "").trim()
+			.toLowerCase(java.util.Locale.ROOT)
+			.replaceAll("[\\s_]+", "-").replaceAll("[^a-z0-9-]", "");
+	}
 
-		String formattedText = messageWidget.getText();
-		if (formattedText == null)
+	@Subscribe
+	public void onMenuOpened(MenuOpened event)
+	{
+		placeProfileEntryBelowLookup();
+		// Broadcasts and clan notices have no sender, so the client never offers "Report" on them.
+		// Instead of hooking that option, find the Live ON chat line under the cursor.
+		Widget messageLines = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+		if (messageLines == null)
 		{
 			return;
 		}
-		String chatText = Text.removeTags(formattedText);
-		if (chatText == null || !chatText.contains("[Live ON]"))
+		net.runelite.api.Point mouse = client.getMouseCanvasPosition();
+		Widget[] children = messageLines.getDynamicChildren();
+		if (mouse == null || children == null)
 		{
 			return;
 		}
+		for (Widget child : children)
+		{
+			if (child == null || child.isHidden() || child.getText() == null
+				|| !child.getBounds().contains(mouse.getX(), mouse.getY()))
+			{
+				continue;
+			}
+			String chatText = Text.removeTags(child.getText());
+			if (chatText != null && chatText.toLowerCase(java.util.Locale.ROOT).contains("[live on")
+				&& addOpenLinkEntries(chatText))
+			{
+				return;
+			}
+		}
+	}
 
+	/** Links the plugin itself put in chat; text typed by other players never gets an "Abrir link" entry. */
+	private final java.util.Set<String> trustedBroadcastUrls = java.util.Collections.newSetFromMap(
+		new java.util.LinkedHashMap<String, Boolean>()
+		{
+			@Override protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest)
+			{
+				return size() > 50;
+			}
+		});
+
+	private boolean isTrustedBroadcastUrl(String url)
+	{
+		synchronized (trustedBroadcastUrls) { return trustedBroadcastUrls.contains(url); }
+	}
+
+	private void rememberBroadcastLinks(String message)
+	{
+		Matcher found = URL_PATTERN.matcher(message == null ? "" : message);
+		while (found.find())
+		{
+			String url = validChatUrl(found.group());
+			if (url != null)
+			{
+				synchronized (trustedBroadcastUrls) { trustedBroadcastUrls.add(url); }
+			}
+		}
+	}
+
+	private boolean addOpenLinkEntries(String chatText)
+	{
 		Matcher urls = URL_PATTERN.matcher(chatText);
 		List<String> addedUrls = new ArrayList<>();
 		int menuPosition = 1;
 		while (urls.find())
 		{
 			String url = validChatUrl(urls.group());
-			if (url == null || addedUrls.contains(url))
+			if (url == null || addedUrls.contains(url) || !isTrustedBroadcastUrl(url))
 			{
 				continue;
 			}
 			addedUrls.add(url);
 			client.getMenu().createMenuEntry(menuPosition++)
-				.setOption("Open link")
+				.setOption("Abrir link")
 				.setTarget(url)
 				.setType(MenuAction.RUNELITE)
 				.onClick(entry -> LinkBrowser.browse(url));
 		}
+		return !addedUrls.isEmpty();
 	}
 
 	private static String validChatUrl(String candidate)
@@ -780,6 +910,7 @@ public class ClanMessagesPlugin extends Plugin
 			&& clanLiveBadgeDecorator != null)
 		{
 			clanLiveBadgeDecorator.refreshAfterRedraw();
+			if (clanBadgeOverlay != null) clanBadgeOverlay.invalidate();
 		}
 	}
 
@@ -1840,6 +1971,7 @@ public class ClanMessagesPlugin extends Plugin
 		lastQuestPoints = -1;
 		lastMaximumQuestPoints = -1;
 		lastObservedRankTotalLevel = -1;
+		lastCarriedRankItemIds = null;
 		questAccount = "";
 		rankWidgetRefreshPending = false;
 		cancelRankBankRefresh();
@@ -1866,11 +1998,26 @@ public class ClanMessagesPlugin extends Plugin
 			rankSyncCompleted = true;
 			scheduleRankBankRefresh();
 		}
-		else if (event.getContainerId() == InventoryID.INV
-			|| event.getContainerId() == InventoryID.WORN)
+		else if ((event.getContainerId() == InventoryID.INV
+			|| event.getContainerId() == InventoryID.WORN) && carriedRankItemsChanged())
 		{
 			refreshRanksAutomatically();
 		}
+	}
+
+	/**
+	 * The ranks only depend on which items are carried, not on how many. Inventory and equipment change
+	 * constantly while skilling or fighting (stack sizes, ammunition), so the ranks are only recalculated
+	 * when the set of item ids is different from the last one seen.
+	 */
+	private boolean carriedRankItemsChanged()
+	{
+		java.util.Set<Integer> carried = new java.util.HashSet<>();
+		collectItemIds(client.getItemContainer(InventoryID.INV), carried);
+		collectItemIds(client.getItemContainer(InventoryID.WORN), carried);
+		if (carried.equals(lastCarriedRankItemIds)) return false;
+		lastCarriedRankItemIds = carried;
+		return true;
 	}
 
 	/**
@@ -3594,15 +3741,9 @@ public class ClanMessagesPlugin extends Plugin
 		bossStatisticsBoardScanTicks--;
 		List<String> texts = new ArrayList<>();
 		List<Map<String, Object>> parsedRecords = parseOfficialBossScoreboards();
-		Widget[] roots = client.getWidgetRoots();
-		if (parsedRecords.isEmpty() && roots != null && !bossStatisticsBoardGroupIds.isEmpty())
+		if (parsedRecords.isEmpty())
 		{
-			java.util.Set<Widget> visited = java.util.Collections.newSetFromMap(
-				new java.util.IdentityHashMap<Widget, Boolean>());
-			for (Widget root : roots)
-			{
-				collectVisibleWidgetTextsForGroups(root, bossStatisticsBoardGroupIds, texts, visited);
-			}
+			for (int groupId : bossStatisticsBoardGroupIds) collectVisibleGroupTexts(groupId, texts);
 		}
 		if (parsedRecords.isEmpty()) parsedRecords = parseBossStatisticsBoardPbs(texts);
 		if (parsedRecords.isEmpty())
@@ -3705,15 +3846,24 @@ public class ClanMessagesPlugin extends Plugin
 		List<String> statsTexts = new ArrayList<>();
 		collectVisibleWidgetTexts(bossStats, statsTexts);
 		Map<String, Object> parsed = parseCombatAchievementBossWidgets(firstWidgetText(bossTexts), statsTexts);
+		log.debug("CA boss page scan: name={}, stats={}, parsed={}", bossTexts, statsTexts, parsed);
 		if (parsed == null) return;
 		combatAchievementPbScanTicks = 0;
 		String boss = (String) parsed.get("boss");
 		double seconds = (Double) parsed.get("seconds");
 		Map<String, Object> payload = pbPayload(boss, 0, seconds);
-		if (requiresExplicitPbTeamSize((String) payload.get("boss"))) return;
+		if (requiresExplicitPbTeamSize((String) payload.get("boss")))
+		{
+			log.debug("CA boss page PB skipped (needs a team size): {}", payload);
+			return;
+		}
 		String signature = authenticatedPlayerName + "\n" + payload.get("boss") + "\n"
 			+ payload.get("mode") + "\n" + seconds;
-		if (!submittedPbSignatures.add(signature)) return;
+		if (!submittedPbSignatures.add(signature))
+		{
+			log.debug("CA boss page PB already submitted this session: {}", payload);
+			return;
+		}
 		submitPb((String) payload.get("boss"), (String) payload.get("mode"), 0, seconds);
 	}
 
@@ -3789,26 +3939,33 @@ public class ClanMessagesPlugin extends Plugin
 		for (Widget child : widgets) collectVisibleWidgetTexts(child, texts, visited);
 	}
 
-	private void collectVisibleWidgetTextsForGroups(Widget widget, java.util.Set<Integer> groupIds, List<String> texts,
-		java.util.Set<Widget> visited)
-	{
-		if (widget == null || widget.isHidden() || !visited.add(widget)) return;
-		if (groupIds.contains(widget.getId() >>> 16))
-		{
-			collectVisibleWidgetTexts(widget, texts);
-			return;
-		}
-		collectVisibleWidgetTextsForGroups(widget.getChildren(), groupIds, texts, visited);
-		collectVisibleWidgetTextsForGroups(widget.getDynamicChildren(), groupIds, texts, visited);
-		collectVisibleWidgetTextsForGroups(widget.getStaticChildren(), groupIds, texts, visited);
-		collectVisibleWidgetTextsForGroups(widget.getNestedChildren(), groupIds, texts, visited);
-	}
+	/** Upper bound on the components looked up in one interface group; real groups are far smaller. */
+	private static final int MAX_GROUP_COMPONENTS = 1500;
 
-	private void collectVisibleWidgetTextsForGroups(Widget[] widgets, java.util.Set<Integer> groupIds, List<String> texts,
-		java.util.Set<Widget> visited)
+	/**
+	 * Visible texts of one interface group. Every interface that opens arms the scoreboard scan, so this
+	 * reads the group's own components instead of walking the whole interface tree to find them.
+	 */
+	private void collectVisibleGroupTexts(int groupId, List<String> texts)
 	{
-		if (widgets == null) return;
-		for (Widget child : widgets) collectVisibleWidgetTextsForGroups(child, groupIds, texts, visited);
+		java.util.Set<Widget> visited = java.util.Collections.newSetFromMap(
+			new java.util.IdentityHashMap<Widget, Boolean>());
+		int missing = 0;
+		for (int componentId = 0; componentId < MAX_GROUP_COMPONENTS && missing < 32; componentId++)
+		{
+			Widget component = client.getWidget(groupId, componentId);
+			if (component == null)
+			{
+				missing++;
+				continue;
+			}
+			missing = 0;
+			// Start only from the group's top-level components; their descendants are reached by the walk,
+			// which keeps the texts in the same order as before.
+			Widget parent = component.getParent();
+			if (parent != null && (parent.getId() >>> 16) == groupId) continue;
+			collectVisibleWidgetTexts(component, texts, visited);
+		}
 	}
 
 	private List<Map<String, Object>> parseOfficialBossScoreboards()
@@ -4942,6 +5099,7 @@ public class ClanMessagesPlugin extends Plugin
 			|| authenticatedPlayerName.isEmpty()) return;
 		long generation = connectionSessionGeneration.get();
 		String account = authenticatedPlayerName;
+		fetchDropOfDay(generation, account);
 		getJson("stats/recent-activity", new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
@@ -4959,6 +5117,61 @@ public class ClanMessagesPlugin extends Plugin
 					RecentActivity[] values = gson.fromJson(response.body().string(), RecentActivity[].class);
 					if (panel != null) panel.updateRecentActivities(values == null
 						? java.util.Collections.emptyList() : java.util.Arrays.asList(values));
+				}
+			}
+		});
+	}
+
+	/**
+	 * The site's "Drop do dia" (most valuable drop since midnight, Brasilia time). It is a public GET on the
+	 * website, so it is sent without the plugin server's credentials.
+	 */
+	private volatile long lastDropOfDayOk;
+
+	/** After 10 minutes without a valid answer, hide the card instead of showing a drop that may be from yesterday. */
+	private void expireStaleDropOfDay()
+	{
+		if (panel != null && lastDropOfDayOk != 0 && System.currentTimeMillis() - lastDropOfDayOk > 10 * 60_000L)
+		{
+			panel.updateDropOfDay(null);
+		}
+	}
+
+	private void fetchDropOfDay(long generation, String account)
+	{
+		okhttp3.Request request = new okhttp3.Request.Builder()
+			.url(LiveOnUrls.TOP_DROP_TODAY).get().build();
+		okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
+		{
+			@Override public void onFailure(okhttp3.Call call, IOException exception)
+			{
+				log.debug("Unable to fetch the drop of the day", exception);
+				expireStaleDropOfDay();
+			}
+
+			@Override public void onResponse(okhttp3.Call call, Response response) throws IOException
+			{
+				try (Response ignored = response)
+				{
+					if (!isCurrentConnectionSession(generation, account)) return;
+					if (!response.isSuccessful() || response.body() == null)
+					{
+						expireStaleDropOfDay();
+						return;
+					}
+					com.google.gson.JsonObject root = gson.fromJson(response.body().string(), com.google.gson.JsonObject.class);
+					com.google.gson.JsonObject drop = root != null && root.has("drop") && root.get("drop").isJsonObject()
+						? root.getAsJsonObject("drop") : null;
+					// A valid answer without a drop means "nothing yet today": show the waiting card.
+					// Failures never get here, so an outage does not claim there was no drop.
+					if (root == null || !root.has("drop")) return;
+					lastDropOfDayOk = System.currentTimeMillis();
+					RecentActivity activity = RecentActivity.dropOfDay(drop);
+					if (panel != null) panel.updateDropOfDay(activity != null ? activity : RecentActivity.noDropToday());
+				}
+				catch (RuntimeException exception)
+				{
+					log.debug("Unexpected drop of the day payload", exception);
 				}
 			}
 		});
@@ -5084,6 +5297,7 @@ public class ClanMessagesPlugin extends Plugin
 					}
 					else
 					{
+						java.util.Set<String> liveBefore = new java.util.HashSet<>(onlineLiveChannels.keySet());
 						onlineLiveChannels.clear();
 						for (LiveChannel channel : channels)
 						{
@@ -5093,7 +5307,11 @@ public class ClanMessagesPlugin extends Plugin
 							}
 						}
 						if (panel != null) panel.updateOnlineLives(channels);
-						clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+						// The chatbox only needs rebuilding (to redraw the LIVE badges) when who is live changed.
+						if (!liveBefore.equals(onlineLiveChannels.keySet()))
+						{
+							clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+						}
 					}
 				}
 			}
@@ -5217,16 +5435,22 @@ public class ClanMessagesPlugin extends Plugin
 					java.util.List<MvpMember> members = parsed == null
 						? java.util.Collections.emptyList()
 						: java.util.Arrays.asList(parsed);
-					mvpMembers.clear();
+					// Add first and drop the leavers afterwards: clearing first left the list empty for a moment
+					// every minute, and the badges blinked out of the clan list.
+					java.util.Set<String> fresh = new java.util.HashSet<>();
 					for (MvpMember member : members)
 					{
 						if (member.playerName != null)
 						{
-							mvpMembers.add(normalizeChatPlayerName(member.playerName));
+							fresh.add(normalizeChatPlayerName(member.playerName));
 						}
 					}
+					// The chatbox only needs rebuilding (to redraw the badges) when the list actually changed.
+					boolean changed = !mvpMembers.equals(fresh);
+					mvpMembers.addAll(fresh);
+					mvpMembers.retainAll(fresh);
 					if (isDeputyOwner && panel != null) panel.updateMvpMembers(members);
-					clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+					if (changed) clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
 				}
 			}
 		});
@@ -5319,7 +5543,8 @@ public class ClanMessagesPlugin extends Plugin
 						return;
 					}
 					ClanTagsResponse parsed = gson.fromJson(response.body().string(), ClanTagsResponse.class);
-					clanTagsByPlayer.clear();
+					// Build the new mapping aside and swap entries in, so the badges never see an empty map.
+					java.util.Map<String, java.util.List<ClanTag>> fresh = new java.util.HashMap<>();
 					if (parsed != null && parsed.tags != null)
 					{
 						for (ClanTag clanTag : parsed.tags)
@@ -5330,12 +5555,19 @@ public class ClanMessagesPlugin extends Plugin
 							for (ClanTagMember member : clanTag.members)
 							{
 								if (member.playerName == null) continue;
-								clanTagsByPlayer.computeIfAbsent(normalizeChatPlayerName(member.playerName), key -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(clanTag);
+								fresh.computeIfAbsent(normalizeChatPlayerName(member.playerName), key -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(clanTag);
 							}
 						}
 					}
+					java.util.Map<String, String> badgesBefore = clanTagBadgesByPlayer();
+					clanTagsByPlayer.putAll(fresh);
+					clanTagsByPlayer.keySet().retainAll(fresh.keySet());
 					if (isDeputyOwner && panel != null) panel.updateClanTags(parsed);
-					clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+					// The chatbox only needs rebuilding (to redraw the badges) when some badge actually changed.
+					if (!badgesBefore.equals(clanTagBadgesByPlayer()))
+					{
+						clientThread.invokeLater(() -> client.runScript(ScriptID.BUILD_CHATBOX));
+					}
 				}
 			}
 		});
@@ -5369,6 +5601,25 @@ public class ClanMessagesPlugin extends Plugin
 				finally { finishPbCategoriesFetch(); }
 			}
 		});
+	}
+
+	/** The server caches the category list for 15 seconds; wait a little longer than that before asking again. */
+	private static final int PB_CATEGORIES_FOLLOW_UP_SECONDS = 17;
+	private ScheduledFuture<?> pbCategoriesFollowUp;
+
+	/**
+	 * Refreshes the PB categories after one of our PBs was accepted. The server's cached list can predate the
+	 * write, so a boss nobody had a time for yet would not show up until the next login; ask once more after
+	 * the cache has expired. Several PBs in a row share a single follow-up, timed from the last one.
+	 */
+	private synchronized void refreshPbCategoriesAfterWrite()
+	{
+		fetchPbCategories();
+		ScheduledExecutorService currentExecutor = executor;
+		if (currentExecutor == null || currentExecutor.isShutdown()) return;
+		if (pbCategoriesFollowUp != null) pbCategoriesFollowUp.cancel(false);
+		pbCategoriesFollowUp = currentExecutor.schedule(this::fetchPbCategories,
+			PB_CATEGORIES_FOLLOW_UP_SECONDS, TimeUnit.SECONDS);
 	}
 
 	private void finishPbCategoriesFetch()
@@ -5421,7 +5672,13 @@ public class ClanMessagesPlugin extends Plugin
 	private void submitPb(String boss, String mode, int teamSize, double seconds, String timeType)
 	{
 		if (!isPbParticipationEnabled() || !PbCategory.isAllowed(boss, mode) || boss.trim().isEmpty()
-			|| !canCaptureOwnRecord(config.pbRankingEnabled()) || !Double.isFinite(seconds) || seconds <= 0) return;
+			|| !canCaptureOwnRecord(config.pbRankingEnabled()) || !Double.isFinite(seconds) || seconds <= 0)
+		{
+			log.debug("PB not submitted: boss={}, mode={}, seconds={}, participating={}, allowed={}, ownRecord={}",
+				boss, mode, seconds, isPbParticipationEnabled(), PbCategory.isAllowed(boss, mode),
+				canCaptureOwnRecord(config.pbRankingEnabled()));
+			return;
+		}
 		String account = WomMembership.normalizePlayerName(client.getLocalPlayer().getName());
 		HttpUrl base = serverBaseUrl();
 		if (base == null || dropDeliveryClient == null) return;
@@ -5433,7 +5690,12 @@ public class ClanMessagesPlugin extends Plugin
 		payload.put("timeType", timeType == null ? "" : timeType.trim());
 		payload.put("seconds", seconds);
 		String json = gson.toJson(payload);
-		if (!queuedPbSignatures.add(pbDedupSignature(account, boss, mode, teamSize, seconds))) return;
+		if (!queuedPbSignatures.add(pbDedupSignature(account, boss, mode, teamSize, seconds)))
+		{
+			log.debug("PB already queued this session: {}", json);
+			return;
+		}
+		log.debug("Submitting PB: {}", json);
 		Request request = new Request.Builder().url(base.newBuilder().addPathSegments("stats/pbs").build())
 			.header("X-Live-On-Player", account).header("Authorization", "LiveOnPlayer " + account)
 			.header("X-Live-On-Event", UUID.randomUUID().toString())
@@ -5497,7 +5759,7 @@ public class ClanMessagesPlugin extends Plugin
 				{
 					if (response.isSuccessful())
 					{
-						fetchPbCategories();
+						refreshPbCategoriesAfterWrite();
 					}
 					else
 					{
@@ -5608,6 +5870,14 @@ public class ClanMessagesPlugin extends Plugin
 		StringBuilder badges = new StringBuilder();
 		for (ClanTag clanTag : tags) badges.append(clanTagMarkup(clanTag));
 		return badges.toString();
+	}
+
+	/** Snapshot of the tag badges every player currently shows, to tell whether a refresh changed anything. */
+	private java.util.Map<String, String> clanTagBadgesByPlayer()
+	{
+		java.util.Map<String, String> badges = new java.util.HashMap<>();
+		for (String player : clanTagsByPlayer.keySet()) badges.put(player, clanTagBadges(player));
+		return badges;
 	}
 
 	String removeKnownClanTagMarkup(String text)
@@ -5721,6 +5991,7 @@ public class ClanMessagesPlugin extends Plugin
 			rankBankLoaded = false;
 			cancelRankBankRefresh();
 			lastObservedRankTotalLevel = -1;
+			lastCarriedRankItemIds = null;
 			rankRequestStatusKnown = false;
 			rankRequestPending = false;
 			questAccount = "";
@@ -5745,6 +6016,7 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void queueBroadcast(String message, boolean clanChannel)
 	{
+		rememberBroadcastLinks(message);
 		clientThread.invoke(() ->
 		{
 			ChatMessageBuilder builder = new ChatMessageBuilder();

@@ -196,25 +196,41 @@ final class ClanMessagesPanel extends PluginPanel
 		JPanel footer = new JPanel(new BorderLayout());
 		footer.setBorder(BorderFactory.createCompoundBorder(
 			BorderFactory.createMatteBorder(1, 0, 0, 0, new java.awt.Color(55, 55, 55)),
-			BorderFactory.createEmptyBorder(6, 10, 2, 10)));
-		JPanel links = new JPanel(new GridLayout(1, 2, 5, 0));
+			BorderFactory.createEmptyBorder(4, 10, 0, 10)));
+		JPanel links = new JPanel(new java.awt.GridBagLayout());
 
-		JButton discord = new JButton("Discord");
+		JButton site = new JButton("liveon.gg");
+		site.setIcon(loadIconPreservingAspect("/live-on-logo.png", 18));
+		site.setIconTextGap(6);
+		site.setFont(site.getFont().deriveFont(Font.BOLD));
+		site.setToolTipText("Abrir o site do Live ON");
+		site.setMargin(new java.awt.Insets(3, 6, 3, 6));
+		site.addActionListener(event -> LinkBrowser.browse(LiveOnUrls.SITE));
+
+		JButton discord = new JButton();
 		discord.setIcon(loadIcon("/links/discord.png", 16));
 		discord.setToolTipText("Abrir Discord do Live ON");
 		discord.setMargin(new java.awt.Insets(3, 6, 3, 6));
 		discord.addActionListener(event -> LinkBrowser.browse("https://www.discord.gg/liveon"));
 
-		JButton wom = new JButton("WOM");
+		JButton wom = new JButton();
 		wom.setIcon(loadIconPreservingAspect("/links/wom.png", 16));
 		wom.setToolTipText("Abrir grupo no Wise Old Man");
 		wom.setMargin(new java.awt.Insets(3, 6, 3, 6));
 		wom.addActionListener(event -> LinkBrowser.browse("https://wiseoldman.net/groups/1945"));
 
-		links.add(discord);
-		links.add(wom);
+		java.awt.GridBagConstraints cell = new java.awt.GridBagConstraints();
+		cell.fill = java.awt.GridBagConstraints.HORIZONTAL;
+		cell.insets = new java.awt.Insets(0, 0, 0, 5);
+		cell.ipady = 1;
+		cell.weightx = 3;
+		links.add(site, cell);
+		cell.weightx = 1;
+		links.add(discord, cell);
+		cell.insets = new java.awt.Insets(0, 0, 0, 0);
+		links.add(wom, cell);
 		footerStatus.setForeground(new java.awt.Color(165, 165, 165));
-		footerStatus.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+		footerStatus.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
 		footer.add(links, BorderLayout.CENTER);
 		footer.add(footerStatus, BorderLayout.SOUTH);
 		return footer;
@@ -520,6 +536,8 @@ final class ClanMessagesPanel extends PluginPanel
 		membersOnly.setForeground(new java.awt.Color(210, 160, 55));
 		membersOnly.setAlignmentX(Component.CENTER_ALIGNMENT);
 		welcome.add(membersOnly);
+		welcome.add(Box.createVerticalStrut(14));
+		welcome.add(LiveOnPanel.createApplyCard());
 		welcome.add(Box.createVerticalGlue());
 		accessTab.add(welcome, BorderLayout.CENTER);
 	}
@@ -1307,6 +1325,7 @@ final class ClanMessagesPanel extends PluginPanel
 	}
 	void updateOnlineLives(java.util.List<LiveChannel> channels) { liveOnTab.updateOnline(channels); }
 	void updateRecentActivities(java.util.List<RecentActivity> activities) { liveOnTab.updateRecent(activities); }
+	void updateDropOfDay(RecentActivity drop) { liveOnTab.updateDropOfDay(drop); }
 	void updateManagedLives(java.util.List<LiveChannel> channels) { liveOnTab.updateManaged(channels); }
 	void setLivesStatus(String text) { liveOnTab.setStatus(text); }
 	void clearLiveFields() { liveOnTab.clearFields(); }

@@ -18,6 +18,7 @@ final class ClanLiveBadgeDecorator
 	private final Client client;
 	private final ClanMessagesPlugin plugin;
 	private int lastRefreshTick = Integer.MIN_VALUE;
+	private boolean cleanedLegacyMarkup;
 	private Set<String> clearingTagMarkup;
 
 	ClanLiveBadgeDecorator(Client client, ClanMessagesPlugin plugin)
@@ -38,6 +39,9 @@ final class ClanLiveBadgeDecorator
 
 	private void refresh(boolean force)
 	{
+		// The badges are drawn by ClanBadgeOverlay and no longer written into the names, so cleaning up
+		// markup left by an older version once is enough.
+		if (cleanedLegacyMarkup) return;
 		int currentTick = client.getTickCount();
 		if (!force && lastRefreshTick != Integer.MIN_VALUE
 			&& currentTick >= lastRefreshTick
@@ -46,7 +50,9 @@ final class ClanLiveBadgeDecorator
 		Widget playerList = client.getWidget(InterfaceID.ClansSidepanel.PLAYERLIST);
 		if (playerList == null || playerList.isHidden()) return;
 		Set<Widget> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-		decorateWidgetTree(playerList, plugin.isLiveStatusVisible(), visited, false);
+		// Badges are drawn by ClanBadgeOverlay; this only strips markup an older version left in the names.
+		decorateWidgetTree(playerList, false, visited, false);
+		cleanedLegacyMarkup = true;
 	}
 
 	/**

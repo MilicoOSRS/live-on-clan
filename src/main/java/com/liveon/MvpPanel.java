@@ -465,6 +465,30 @@ final class MvpPanel extends JPanel
 		return row;
 	}
 
+	private static final String NO_TOGGLE = "liveon.noToggle";
+
+	/** Link to the member's site profile, shown inside an expanded ranking entry. */
+	private static JPanel createProfileLink(String playerName)
+	{
+		String slug = ClanMessagesPlugin.playerProfileSlug(playerName);
+		JPanel holder = new JPanel(new BorderLayout());
+		holder.setOpaque(false);
+		holder.setAlignmentX(Component.LEFT_ALIGNMENT);
+		holder.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		if (slug.isEmpty()) return holder;
+		JButton open = new JButton("Ver perfil Live ON ↗");
+		open.putClientProperty(NO_TOGGLE, Boolean.TRUE);
+		open.setFont(META_FONT);
+		open.setFocusable(false);
+		open.setMargin(new java.awt.Insets(2, 8, 2, 8));
+		open.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		open.setToolTipText("Abrir " + LiveOnUrls.playerProfile(slug));
+		open.addActionListener(event ->
+			net.runelite.client.util.LinkBrowser.browse(LiveOnUrls.playerProfile(slug)));
+		holder.add(open, BorderLayout.WEST);
+		return holder;
+	}
+
 	private static JPanel createEfficiencyDetails(MvpEfficiencyEntry entry, String metricType,
 		Color background, int leftPadding)
 	{
@@ -487,6 +511,8 @@ final class MvpPanel extends JPanel
 			unavailable.setFont(META_FONT);
 			unavailable.setForeground(LiveOnTheme.TEXT_MUTED);
 			details.add(unavailable);
+			details.add(javax.swing.Box.createVerticalStrut(6));
+			details.add(createProfileLink(entry.getPlayerName()));
 			return details;
 		}
 		for (MvpEfficiencyContribution contribution : shown)
@@ -507,6 +533,8 @@ final class MvpPanel extends JPanel
 			line.setMaximumSize(new Dimension(Integer.MAX_VALUE, 16));
 			details.add(line);
 		}
+		details.add(javax.swing.Box.createVerticalStrut(6));
+		details.add(createProfileLink(entry.getPlayerName()));
 		return details;
 	}
 
@@ -539,6 +567,11 @@ final class MvpPanel extends JPanel
 	private void makeEfficiencyGroupClickable(Component component, MvpEfficiencyEntry entry, String metricType,
 		String hint)
 	{
+		if (component instanceof javax.swing.JComponent
+			&& Boolean.TRUE.equals(((javax.swing.JComponent) component).getClientProperty(NO_TOGGLE)))
+		{
+			return;
+		}
 		if (component instanceof javax.swing.JComponent)
 		{
 			javax.swing.JComponent clickable = (javax.swing.JComponent) component;
@@ -1082,6 +1115,11 @@ final class MvpPanel extends JPanel
 
 	private void makeDropGroupClickable(Component component, MvpDropEntry entry, String hint)
 	{
+		if (component instanceof javax.swing.JComponent
+			&& Boolean.TRUE.equals(((javax.swing.JComponent) component).getClientProperty(NO_TOGGLE)))
+		{
+			return;
+		}
 		if (component instanceof javax.swing.JComponent)
 		{
 			javax.swing.JComponent clickable = (javax.swing.JComponent) component;
@@ -1131,8 +1169,10 @@ final class MvpPanel extends JPanel
 		panel.setBackground(background);
 		panel.setBorder(BorderFactory.createEmptyBorder(7, leftPadding, 8, 5));
 		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 123));
+		panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
 		panel.add(leftPinnedDropDetails(entry));
+		panel.add(javax.swing.Box.createVerticalStrut(6));
+		panel.add(createProfileLink(entry.getPlayerName()));
 		return panel;
 	}
 
