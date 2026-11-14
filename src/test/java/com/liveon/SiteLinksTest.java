@@ -4,8 +4,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import org.junit.Test;
 
 public class SiteLinksTest
@@ -48,26 +46,24 @@ public class SiteLinksTest
 	}
 
 	@Test
-	public void buildsTheDropOfTheDayFromTheSitePayload()
+	public void buildsTheDropOfTheDayFromTheServerRanking()
 	{
-		JsonObject drop = new JsonParser().parse("{\"player_name\":\"Hahahaphael\",\"item_name\":\"Ultor vestige\","
-			+ "\"quantity\":1,\"value\":50000,\"source\":\"Vardorvis\"}").getAsJsonObject();
-		RecentActivity activity = RecentActivity.dropOfDay(drop);
+		com.google.gson.Gson gson = new com.google.gson.Gson();
+		MvpDropEntry[] ranking = gson.fromJson("[{\"player_name\":\"A\",\"top_drops\":[{\"item\":\"1x Ultor vestige\","
+			+ "\"value\":50000000,\"source\":\"Vardorvis\"}]},{\"player_name\":\"B\",\"top_drops\":["
+			+ "{\"item\":\"3x Coins\",\"value\":3000000,\"source\":null}]}]", MvpDropEntry[].class);
+		RecentActivity activity = RecentActivity.dropOfDay(ranking);
 		assertNotNull(activity);
 		assertEquals(RecentActivity.DROP_OF_DAY, activity.type);
-		assertEquals("Hahahaphael", activity.player_name);
-		assertEquals("Drop do dia: Ultor vestige (50K) em Vardorvis", activity.title);
-
-		JsonObject stack = new JsonParser().parse("{\"player_name\":\"A\",\"item_name\":\"Coins\","
-			+ "\"quantity\":3,\"value\":0,\"source\":null}").getAsJsonObject();
-		assertEquals("Drop do dia: 3x Coins", RecentActivity.dropOfDay(stack).title);
+		assertEquals("A", activity.player_name);
+		assertEquals("Drop do dia: Ultor vestige (50.0M)", activity.title);
+		assertNull(RecentActivity.dropOfDay(new MvpDropEntry[0]));
 	}
 
 	@Test
 	public void noDropMeansWaitingCardNotAnError()
 	{
-		assertNull(RecentActivity.dropOfDay(null));
-		assertNull(RecentActivity.dropOfDay(new JsonObject()));
+		assertNull(RecentActivity.dropOfDay((MvpDropEntry[]) null));
 		RecentActivity waiting = RecentActivity.noDropToday();
 		assertEquals(RecentActivity.DROP_OF_DAY, waiting.type);
 		assertEquals("", waiting.player_name);

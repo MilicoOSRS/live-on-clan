@@ -1,7 +1,5 @@
 package com.liveon;
 
-import com.google.gson.JsonObject;
-
 final class RecentActivity
 {
 	static final String DROP_OF_DAY = "DROP_OF_DAY";
@@ -16,23 +14,34 @@ final class RecentActivity
 		RecentActivity activity = new RecentActivity();
 		activity.type = DROP_OF_DAY;
 		activity.player_name = "";
-		activity.title = "Drop do dia: Nenhum drop hoje ainda. Seja o primeiro!";
+		activity.title = "Drop do dia: Nenhum drop de 1M+ hoje ainda. Seja o primeiro!";
 		return activity;
 	}
 
-	/** Builds the pinned "Drop do dia" row from the site's top-today payload; null when there is no drop yet. */
-	static RecentActivity dropOfDay(JsonObject drop)
+	/** Builds the pinned "Drop do dia" row from the server's ranking since midnight; null when there is no drop yet. */
+	static RecentActivity dropOfDay(MvpDropEntry[] ranking)
 	{
-		if (drop == null || !drop.has("player_name") || drop.get("player_name").isJsonNull()
-			|| !drop.has("item_name") || drop.get("item_name").isJsonNull()) return null;
-		long quantity = drop.has("quantity") && !drop.get("quantity").isJsonNull() ? drop.get("quantity").getAsLong() : 1;
-		long value = drop.has("value") && !drop.get("value").isJsonNull() ? drop.get("value").getAsLong() : 0;
-		String source = drop.has("source") && !drop.get("source").isJsonNull() ? drop.get("source").getAsString().trim() : "";
+		if (ranking == null) return null;
+		MvpDropEntry bestEntry = null;
+		MvpDropDetail best = null;
+		for (MvpDropEntry entry : ranking)
+		{
+			if (entry == null || entry.getTopDrops() == null || entry.getPlayerName() == null) continue;
+			for (MvpDropDetail drop : entry.getTopDrops())
+			{
+				if (drop != null && drop.getItem() != null && (best == null || drop.getValue() > best.getValue()))
+				{
+					best = drop;
+					bestEntry = entry;
+				}
+			}
+		}
+		if (best == null) return null;
+		String item = best.getItem().trim().replaceFirst("(?i)^1x\\s+", "");
 		RecentActivity activity = new RecentActivity();
 		activity.type = DROP_OF_DAY;
-		activity.player_name = drop.get("player_name").getAsString();
-		activity.title = "Drop do dia: " + (quantity > 1 ? quantity + "x " : "") + drop.get("item_name").getAsString()
-			+ (value > 0 ? " (" + shortGp(value) + ")" : "") + (source.isEmpty() ? "" : " em " + source);
+		activity.player_name = bestEntry.getPlayerName();
+		activity.title = "Drop do dia: " + item + (best.getValue() > 0 ? " (" + shortGp(best.getValue()) + ")" : "");
 		return activity;
 	}
 

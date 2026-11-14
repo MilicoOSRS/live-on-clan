@@ -1,11 +1,10 @@
 package com.liveon;
 
-/** Every address of the clan website the plugin links to or reads, in one place. */
+/** Every address of the clan website the plugin links to, in one place. They are only opened in the browser on a click; the plugin never requests them. */
 final class LiveOnUrls
 {
 	static final String SITE = "https://liveon.gg";
 	static final String APPLY = SITE + "/recrutamento";
-	static final String TOP_DROP_TODAY = SITE + "/member/drops/top-today";
 
 	private LiveOnUrls()
 	{

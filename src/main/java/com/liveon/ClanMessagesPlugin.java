@@ -5123,8 +5123,8 @@ public class ClanMessagesPlugin extends Plugin
 	}
 
 	/**
-	 * The site's "Drop do dia" (most valuable drop since midnight, Brasilia time). It is a public GET on the
-	 * website, so it is sent without the plugin server's credentials.
+	 * The "Drop do dia": the most valuable drop since midnight (Brasilia time). It comes from the plugin server's own
+	 * MVP drops ranking, so it needs no request to any other host.
 	 */
 	private volatile long lastDropOfDayOk;
 
@@ -5139,9 +5139,12 @@ public class ClanMessagesPlugin extends Plugin
 
 	private void fetchDropOfDay(long generation, String account)
 	{
-		okhttp3.Request request = new okhttp3.Request.Builder()
-			.url(LiveOnUrls.TOP_DROP_TODAY).get().build();
-		okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
+		HttpUrl base = serverBaseUrl();
+		if (base == null) return;
+		String since = java.time.LocalDate.now(java.time.ZoneId.of("America/Sao_Paulo"))
+			.atStartOfDay(java.time.ZoneId.of("America/Sao_Paulo")).toInstant().toString();
+		HttpUrl url = base.newBuilder().addPathSegments("stats/mvp-drops").addQueryParameter("since", since).build();
+		okHttpClient.newCall(requestBuilder(url).get().build()).enqueue(new okhttp3.Callback()
 		{
 			@Override public void onFailure(okhttp3.Call call, IOException exception)
 			{
@@ -5159,14 +5162,12 @@ public class ClanMessagesPlugin extends Plugin
 						expireStaleDropOfDay();
 						return;
 					}
-					com.google.gson.JsonObject root = gson.fromJson(response.body().string(), com.google.gson.JsonObject.class);
-					com.google.gson.JsonObject drop = root != null && root.has("drop") && root.get("drop").isJsonObject()
-						? root.getAsJsonObject("drop") : null;
+					MvpDropResponse result = gson.fromJson(response.body().string(), MvpDropResponse.class);
 					// A valid answer without a drop means "nothing yet today": show the waiting card.
 					// Failures never get here, so an outage does not claim there was no drop.
-					if (root == null || !root.has("drop")) return;
+					if (result == null || result.ranking == null) return;
 					lastDropOfDayOk = System.currentTimeMillis();
-					RecentActivity activity = RecentActivity.dropOfDay(drop);
+					RecentActivity activity = RecentActivity.dropOfDay(result.ranking);
 					if (panel != null) panel.updateDropOfDay(activity != null ? activity : RecentActivity.noDropToday());
 				}
 				catch (RuntimeException exception)
